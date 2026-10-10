@@ -6,94 +6,259 @@
 <title>CoeFont Subtitle Overlay</title>
 <style>
   :root { color-scheme: dark; }
-  body { margin: 0; padding: 16px; font: 14px/1.5 system-ui, sans-serif; background: #16181c; color: #e6e6e6; }
-  h1 { font-size: 16px; margin: 0 0 12px; }
-  h2 { font-size: 14px; margin: 24px 0 8px; }
-  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-  button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid #444; background: #2a2d33; color: inherit; cursor: pointer; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 12px; font: 13px/1.5 system-ui, sans-serif; background: #16181c; color: #e6e6e6; }
+  h2 { font-size: 12px; font-weight: 600; margin: 0 0 6px; color: #bbb; }
+  h2 small { font-weight: 400; color: #888; margin-left: 8px; }
+  button { font: inherit; padding: 6px 12px; border-radius: 5px; border: 1px solid #444; background: #2a2d33; color: inherit; cursor: pointer; }
+  button:hover:not(:disabled) { background: #343840; }
   button.primary { background: #2f6feb; border-color: #2f6feb; color: #fff; }
+  button.primary:hover:not(:disabled) { background: #4380f0; }
+  button.big { padding: 10px 14px; width: 100%; }
   button:disabled { opacity: .4; cursor: not-allowed; }
-  #status { padding: 8px 12px; border-radius: 6px; background: #22252b; margin-bottom: 12px; white-space: pre-line; }
+  select { font: inherit; padding: 4px; }
+  #status { padding: 6px 10px; border-radius: 5px; background: #22252b; margin-bottom: 10px; white-space: pre-line; }
   #status.error { background: #4a1f1f; }
   #status.warn { background: #4a3d1f; }
-  #stage { position: relative; overflow: hidden; max-width: 1100px; background: #000; border-radius: 6px; cursor: crosshair; touch-action: none; user-select: none; }
+  .hint { color: #999; font-size: 12px; }
+  [hidden] { display: none !important; }
+
+  .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .docks { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 12px; }
+  @media (max-width: 900px) { .panes, .docks { grid-template-columns: 1fr; } }
+  .dock { background: #1e2126; border: 1px solid #2c3037; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .row .name { flex: 1; }
+  .row input[type=range] { flex: 1; min-width: 0; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #555; flex: none; }
+  .dot.on { background: #3fb950; }
+
+  .view { position: relative; overflow: hidden; background: #000; border-radius: 6px; user-select: none; touch-action: none; }
+  .empty { position: absolute; left: 0; right: 0; top: 30%; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; padding: 0 12px; }
+
+  #stage { cursor: crosshair; }
   #stage video { display: block; width: 100%; }
-  #stage:not(.live) { aspect-ratio: 16 / 9; }
+  #stage:not(.live) { aspect-ratio: 16 / 9; cursor: default; }
   /* 選択範囲外を暗くするのに巨大なbox-shadowを使う(親のoverflow:hiddenで切る) */
   #sel { position: absolute; border: 2px solid #2f6feb; box-shadow: 0 0 0 9999px rgba(0, 0, 0, .55); pointer-events: none; display: none; }
   #stage.live #sel { display: block; }
-  .sliders { display: grid; grid-template-columns: auto 1fr 3.5em; gap: 4px 10px; max-width: 520px; margin-top: 12px; align-items: center; }
-  .sliders input[type=range] { width: 100%; }
+
+  #canvasWrap { aspect-ratio: 16 / 9; }
+  #canvas { position: absolute; inset: 0; }
+  #gizmo { position: absolute; border: 2px solid #e5484d; cursor: move; display: none; }
+  #gizmo i { position: absolute; width: 12px; height: 12px; background: #e5484d; }
+  #gizmo i[data-h=nw] { left: -7px; top: -7px; cursor: nwse-resize; }
+  #gizmo i[data-h=se] { right: -7px; bottom: -7px; cursor: nwse-resize; }
+  #gizmo i[data-h=ne] { right: -7px; top: -7px; cursor: nesw-resize; }
+  #gizmo i[data-h=sw] { left: -7px; bottom: -7px; cursor: nesw-resize; }
+
   /* display:noneだと動画PiPの元として再生されないことがあるので見えない大きさで置く */
   #pipVideo { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-  .hint { color: #999; font-size: 12px; margin-top: 6px; }
 </style>
 </head>
 <body>
-<h1>CoeFont Subtitle Overlay</h1>
 
-<div id="status">CoeFont の通訳タブを別タブで開いてから「字幕画面を選択」を押してください。</div>
+<div id="status"></div>
 
-<div class="bar">
-  <button id="pick" class="primary">① 字幕画面を選択</button>
-  <button id="show" disabled>② 字幕を表示</button>
-  <button id="stop" disabled>共有を停止</button>
-  <label><input type="checkbox" id="frameless"> 枠なし(URLバーを出さない)</label>
-  <label>背景色 <input type="color" id="bg"></label>
-  <button id="reset">切り抜きを初期値に戻す</button>
+<div class="panes">
+  <section>
+    <h2>入力: CoeFont<small>ドラッグで字幕の範囲を囲む</small></h2>
+    <div id="stage" class="view">
+      <video id="preview" muted playsinline autoplay></video>
+      <div id="sel"></div>
+      <div class="empty" id="emptySub">
+        <button class="primary" data-act="pickSub">CoeFont のタブを選択</button>
+        <div class="hint">CoeFont の通訳画面を別タブで開いておく</div>
+      </div>
+    </div>
+  </section>
+  <section>
+    <h2>出力プレビュー<small>字幕をドラッグで移動、角で拡大縮小</small></h2>
+    <div id="canvasWrap" class="view">
+      <div id="canvas"></div>
+      <div id="gizmo"><i data-h="nw"></i><i data-h="ne"></i><i data-h="sw"></i><i data-h="se"></i></div>
+      <div class="empty" id="emptySlide">
+        <button data-act="pickSlide">スライドショーのウィンドウを選択</button>
+        <div class="hint">先にスライドショーを開始しておく(字幕だけの小窓を使うなら不要)</div>
+      </div>
+    </div>
+  </section>
 </div>
 
-<div id="stage"><video id="preview" muted playsinline autoplay></video><div id="sel"></div></div>
+<div class="docks">
+  <div class="dock">
+    <h2>ソース</h2>
+    <div class="row"><span class="dot" id="dotSub"></span><span class="name">字幕(CoeFont のタブ)</span>
+      <button data-act="pickSub" id="btnSub">選択</button><button data-act="stopSub" id="stopSub">停止</button></div>
+    <div class="row"><span class="dot" id="dotSlide"></span><span class="name">スライド(スライドショーのウィンドウ)</span>
+      <button data-act="pickSlide" id="btnSlide">選択</button><button data-act="stopSlide" id="stopSlide">停止</button></div>
+  </div>
+
+  <div class="dock">
+    <h2>字幕の見た目</h2>
+    <div class="row"><label for="blend">背景の透過</label>
+      <select id="blend">
+        <option value="normal">なし</option>
+        <option value="multiply">白地を抜く(暗い文字用)</option>
+        <option value="screen">黒地を抜く(明るい文字用)</option>
+      </select></div>
+    <div class="row"><label for="subOpacity">不透明度</label><input type="range" id="subOpacity" min="20" max="100"><output id="oOpacity"></output></div>
+    <div class="row"><button data-act="resetCrop">切り抜きを初期化</button><button data-act="resetPos">配置を初期化</button></div>
+  </div>
+
+  <div class="dock">
+    <h2>出力</h2>
+    <button class="big primary" data-act="openStage" id="openStage">聴衆用の全画面出力を開く(スライド+字幕)</button>
+    <div class="hint">開いた窓を聴衆側ディスプレイへ移動し、クリックで全画面。スライドショーの上にかぶせて使う。</div>
+    <button class="big" data-act="showPip" id="showPip">字幕だけを小窓で出す</button>
+    <label class="hint"><input type="checkbox" id="frameless"> 小窓にURLの帯を出さない(小窓の縦横比は固定になる)</label>
+  </div>
+</div>
+
 <video id="pipVideo" muted playsinline autoplay></video>
-<div class="hint">プレビュー上をドラッグして字幕領域を囲む(またはスライダーで調整)。字幕ウィンドウを開いた後も調整は即時反映されます。</div>
-
-<div class="sliders">
-  <label for="sy">上端</label><input type="range" id="sy" min="0" max="98" step="0.5"><output id="oy"></output>
-  <label for="sh">高さ</label><input type="range" id="sh" min="2" max="100" step="0.5"><output id="oh"></output>
-  <label for="sx">左端</label><input type="range" id="sx" min="0" max="98" step="0.5"><output id="ox"></output>
-  <label for="sw">幅</label><input type="range" id="sw" min="2" max="100" step="0.5"><output id="ow"></output>
-</div>
-
-<h2>合成表示(スライドに字幕を重ねて聴衆側に全画面で出す)</h2>
-<div class="bar">
-  <button id="pickSlide">③ スライドショーのウィンドウを選択</button>
-  <button id="openStage" disabled>④ 合成画面を開く</button>
-  <label>字幕の透過 <select id="blend">
-    <option value="normal">なし</option>
-    <option value="multiply">白地を抜く(暗い文字用)</option>
-    <option value="screen">黒地を抜く(明るい文字用)</option>
-  </select></label>
-</div>
-<div class="hint">先に PowerPoint 等のスライドショーを開始してから③でそのウィンドウを選ぶ。④で開いた窓を聴衆側ディスプレイへ移動し、クリックで全画面にする。</div>
-<div class="sliders">
-  <label for="subW">字幕の幅</label><input type="range" id="subW" min="10" max="100" step="1"><output id="osubW"></output>
-  <label for="subBottom">下からの位置</label><input type="range" id="subBottom" min="0" max="90" step="0.5"><output id="osubBottom"></output>
-  <label for="subOpacity">不透明度</label><input type="range" id="subOpacity" min="20" max="100" step="1"><output id="osubOpacity"></output>
-</div>
 
 <script>
 const $ = (id) => document.getElementById(id);
 const STORE_KEY = 'coefont-subtitle-overlay';
-const DEFAULTS = { x: 0, y: 0.62, w: 1, h: 0.38, bg: '#000000', frameless: true, subW: 0.8, subBottom: 0.03, subOpacity: 1, blend: 'normal' };
-const STAGE_KEYS = ['subW', 'subBottom', 'subOpacity'];
+const CROP_DEFAULTS = { x: 0, y: 0.62, w: 1, h: 0.38 };
+const POS_DEFAULTS = { subX: 0.1, subY: 0.76, subW: 0.8 };
+const DEFAULTS = { ...CROP_DEFAULTS, ...POS_DEFAULTS, subOpacity: 1, blend: 'normal', frameless: true };
 const MIN = 0.02;
+const IDLE_STATUS = 'CoeFont のタブを選び、字幕の範囲を囲んでから、右下の「出力」で表示先を開きます。';
 
 let cfg = { ...DEFAULTS };
 try { Object.assign(cfg, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); } catch {}
 
-let stream = null;
-let out = null; // { win, box, video }
-let cropped = null; // 枠なしモード用に切り抜いた映像トラック
-let slideStream = null;
-let comp = null; // 合成画面 { win, slide, box, video }
+let stream = null;      // CoeFont
+let slideStream = null; // スライドショー
+let out = null;         // Document PiPの小窓 { win, box, video }
+let comp = null;        // 聴衆用の全画面出力 { win, scene }
+let cropped = null;     // 動画PiP用に切り抜いた映像トラック
 
 const preview = $('preview');
 const stage = $('stage');
+const gizmo = $('gizmo');
 const pipVideo = $('pipVideo');
 const hasDocPiP = 'documentPictureInPicture' in window;
 // Document PiPはオリジン表示の帯を消せないため、帯のない動画PiPに切り抜き済み映像を流す経路を別に持つ
 const hasFrameless = !!(window.MediaStreamTrackProcessor && window.MediaStreamTrackGenerator && document.pictureInPictureEnabled);
-const isShown = () => !!out || document.pictureInPictureElement === pipVideo;
+const pipShown = () => !!out || document.pictureInPictureElement === pipVideo;
+const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+
+function setStatus(text, kind = '') {
+  $('status').textContent = text;
+  $('status').className = kind;
+}
+
+function makeVideo(doc, css) {
+  const video = doc.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.autoplay = true;
+  video.style.cssText = css;
+  return video;
+}
+
+function attach(video, s) {
+  video.srcObject = s;
+  if (s) video.play().catch(() => {});
+}
+
+// 切り抜きはvideoを拡大してboxのoverflowで切るだけ。毎フレームの画像処理をしないので裏に回っても止まらない
+function placeCropped(box, video, scale) {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  box.style.width = cfg.w * vw * scale + 'px';
+  box.style.height = cfg.h * vh * scale + 'px';
+  video.style.width = vw * scale + 'px';
+  video.style.height = vh * scale + 'px';
+  video.style.left = -cfg.x * vw * scale + 'px';
+  video.style.top = -cfg.y * vh * scale + 'px';
+}
+
+// スライド+字幕の合成。プレビューと全画面出力で同じものを組むので、配置は全てrootに対する割合で持つ
+function makeScene(doc, root, afterLayout) {
+  const slide = makeVideo(doc, 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;');
+  const box = doc.createElement('div');
+  box.style.cssText = 'position:absolute;overflow:hidden;';
+  const video = makeVideo(doc, 'position:absolute;max-width:none;');
+  box.append(video);
+  root.append(slide, box);
+  const scene = {
+    root, slide, box, video,
+    layout() {
+      const ready = video.videoWidth && video.videoHeight;
+      box.style.display = ready ? '' : 'none';
+      if (ready) {
+        const W = root.clientWidth;
+        placeCropped(box, video, W * cfg.subW / (cfg.w * video.videoWidth));
+        box.style.left = cfg.subX * W + 'px';
+        box.style.top = cfg.subY * root.clientHeight + 'px';
+        box.style.mixBlendMode = cfg.blend;
+        box.style.opacity = cfg.subOpacity;
+      }
+      if (afterLayout) afterLayout(scene);
+    },
+  };
+  for (const ev of ['loadedmetadata', 'resize', 'emptied']) video.addEventListener(ev, scene.layout);
+  return scene;
+}
+
+// 枠線に合成モードが掛からないよう、操作用の枠は字幕boxの外に重ねて置く
+const previewScene = makeScene(document, $('canvas'), ({ box }) => {
+  const shown = box.style.display !== 'none';
+  gizmo.style.display = shown ? 'block' : 'none';
+  if (shown) for (const k of ['left', 'top', 'width', 'height']) gizmo.style[k] = box.style[k];
+});
+new ResizeObserver(() => previewScene.layout()).observe($('canvas'));
+
+function layoutOut() {
+  if (!out) return;
+  const { win, box, video } = out;
+  if (!video.videoWidth || !video.videoHeight) return;
+  placeCropped(box, video, Math.min(win.innerWidth / (cfg.w * video.videoWidth), win.innerHeight / (cfg.h * video.videoHeight)));
+}
+
+function normalize() {
+  cfg.x = clamp(cfg.x, 0, 1 - MIN);
+  cfg.y = clamp(cfg.y, 0, 1 - MIN);
+  cfg.w = clamp(cfg.w, MIN, 1 - cfg.x);
+  cfg.h = clamp(cfg.h, MIN, 1 - cfg.y);
+  cfg.subW = clamp(cfg.subW, 0.1, 1);
+  cfg.subX = clamp(cfg.subX, 0, 1 - cfg.subW);
+  cfg.subY = clamp(cfg.subY, 0, 0.98);
+}
+
+function render() {
+  normalize();
+  const sel = $('sel');
+  sel.style.left = cfg.x * 100 + '%';
+  sel.style.top = cfg.y * 100 + '%';
+  sel.style.width = cfg.w * 100 + '%';
+  sel.style.height = cfg.h * 100 + '%';
+  $('blend').value = cfg.blend;
+  $('subOpacity').value = cfg.subOpacity * 100;
+  $('oOpacity').textContent = Math.round(cfg.subOpacity * 100) + '%';
+  $('frameless').checked = cfg.frameless && hasFrameless;
+  previewScene.layout();
+  if (comp) comp.scene.layout();
+  layoutOut();
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch {}
+}
+
+function updateUI() {
+  stage.classList.toggle('live', !!stream);
+  $('emptySub').hidden = !!stream;
+  $('emptySlide').hidden = !!slideStream;
+  $('dotSub').classList.toggle('on', !!stream);
+  $('dotSlide').classList.toggle('on', !!slideStream);
+  $('btnSub').textContent = stream ? '変更' : '選択';
+  $('btnSlide').textContent = slideStream ? '変更' : '選択';
+  $('stopSub').disabled = !stream;
+  $('stopSlide').disabled = !slideStream;
+  $('showPip').disabled = !stream;
+  $('showPip').textContent = pipShown() ? '字幕の小窓を開き直す' : '字幕だけを小窓で出す';
+  $('openStage').textContent = comp ? '聴衆用の全画面出力を開き直す' : '聴衆用の全画面出力を開く(スライド+字幕)';
+}
 
 // canvas+タイマーで描くとこのタブが裏に回った時に間引かれるので、フレーム到着で駆動されるストリーム変換で切り抜く
 function startCropped(track) {
@@ -122,154 +287,112 @@ function startCropped(track) {
   attach(pipVideo, new MediaStream([gen]));
 }
 
-function setStatus(text, kind = '') {
-  $('status').textContent = text;
-  $('status').className = kind;
+// --- ソース ---
+function setSub(s) {
+  if (stream) stream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+  stream = s;
+  attach(preview, s);
+  attach(previewScene.video, s);
+  if (comp) attach(comp.scene.video, s);
+  if (out) attach(out.video, s);
+  if (s && hasFrameless) startCropped(s.getVideoTracks()[0]);
+  if (!s && cropped) { cropped.stop(); cropped = null; }
+  updateUI();
 }
 
-function save() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch {}
+function setSlide(s) {
+  if (slideStream) slideStream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+  slideStream = s;
+  attach(previewScene.slide, s);
+  if (comp) attach(comp.scene.slide, s);
+  updateUI();
 }
 
-function clampCrop() {
-  cfg.x = Math.min(Math.max(cfg.x, 0), 1 - MIN);
-  cfg.y = Math.min(Math.max(cfg.y, 0), 1 - MIN);
-  cfg.w = Math.min(Math.max(cfg.w, MIN), 1 - cfg.x);
-  cfg.h = Math.min(Math.max(cfg.h, MIN), 1 - cfg.y);
-}
-
-// 切り抜き範囲をウィンドウ内に最大サイズで収める。videoを拡大してboxのoverflowで切るだけなので毎フレーム処理は不要
-function layoutOut() {
-  if (!out) return;
-  const { win, box, video } = out;
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || !vh) return;
-  const cw = cfg.w * vw, ch = cfg.h * vh;
-  const s = Math.min(win.innerWidth / cw, win.innerHeight / ch);
-  box.style.width = cw * s + 'px';
-  box.style.height = ch * s + 'px';
-  video.style.width = vw * s + 'px';
-  video.style.height = vh * s + 'px';
-  video.style.left = -cfg.x * vw * s + 'px';
-  video.style.top = -cfg.y * vh * s + 'px';
-  win.document.body.style.background = cfg.bg;
-}
-
-// 字幕の縦横比は切り抜き範囲で決まるので、幅と下端だけ指定させて高さは従属させる
-function layoutComp() {
-  if (!comp) return;
-  const { win, box, video } = comp;
-  box.style.mixBlendMode = cfg.blend;
-  box.style.opacity = cfg.subOpacity;
-  const vw = video.videoWidth, vh = video.videoHeight;
-  box.style.display = vw && vh ? '' : 'none';
-  if (!vw || !vh) return;
-  const W = win.innerWidth, cw = cfg.w * vw, ch = cfg.h * vh;
-  const s = W * cfg.subW / cw;
-  box.style.width = cw * s + 'px';
-  box.style.height = ch * s + 'px';
-  box.style.left = (W - cw * s) / 2 + 'px';
-  box.style.bottom = win.innerHeight * cfg.subBottom + 'px';
-  video.style.width = vw * s + 'px';
-  video.style.height = vh * s + 'px';
-  video.style.left = -cfg.x * vw * s + 'px';
-  video.style.top = -cfg.y * vh * s + 'px';
-}
-
-function makeVideo(doc, css) {
-  const video = doc.createElement('video');
-  video.muted = true;
-  video.playsInline = true;
-  video.autoplay = true;
-  video.style.cssText = css;
-  return video;
-}
-
-function render() {
-  clampCrop();
-  const pct = (v) => (v * 100).toFixed(1);
-  const sel = $('sel');
-  sel.style.left = pct(cfg.x) + '%';
-  sel.style.top = pct(cfg.y) + '%';
-  sel.style.width = pct(cfg.w) + '%';
-  sel.style.height = pct(cfg.h) + '%';
-  for (const k of ['x', 'y', 'w', 'h']) {
-    $('s' + k).value = cfg[k] * 100;
-    $('o' + k).textContent = Math.round(cfg[k] * 100) + '%';
-  }
-  $('bg').value = cfg.bg;
-  $('frameless').checked = cfg.frameless && hasFrameless;
-  for (const k of STAGE_KEYS) {
-    $(k).value = cfg[k] * 100;
-    $('o' + k).textContent = Math.round(cfg[k] * 100) + '%';
-  }
-  $('blend').value = cfg.blend;
-  layoutOut();
-  layoutComp();
-  save();
-}
-
-function updateButtons() {
-  $('show').disabled = !stream;
-  $('stop').disabled = !stream;
-  $('openStage').disabled = !slideStream;
-  $('openStage').textContent = comp ? '④ 合成画面を開き直す' : '④ 合成画面を開く';
-  $('show').textContent = isShown() ? '② 字幕ウィンドウを開き直す' : '② 字幕を表示';
-  stage.classList.toggle('live', !!stream);
-}
-
-function attach(video, s) {
-  video.srcObject = s;
-  if (s) video.play().catch(() => {});
-}
-
-function dropStream(message, kind) {
-  if (stream) stream.getTracks().forEach((t) => t.stop());
-  stream = null;
-  attach(preview, null);
-  if (out) attach(out.video, null);
-  if (comp) { attach(comp.video, null); layoutComp(); }
-  if (cropped) { cropped.stop(); cropped = null; }
-  updateButtons();
-  setStatus(message, kind);
-}
-
-async function pick() {
-  let s;
+async function capture(video) {
   try {
-    s = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 15, max: 30 } },
-      audio: false,
-      selfBrowserSurface: 'exclude',
-      surfaceSwitching: 'include',
-    });
+    return await navigator.mediaDevices.getDisplayMedia({ video, audio: false, selfBrowserSurface: 'exclude', surfaceSwitching: 'include' });
   } catch (e) {
     if (e.name === 'NotAllowedError') {
-      if (!stream) setStatus('画面の選択がキャンセル(または拒否)されました。もう一度「字幕画面を選択」を押してください。\nmacOSで毎回失敗する場合は、システム設定 > プライバシーとセキュリティ > 画面収録 でブラウザを許可してください。', 'warn');
+      setStatus('画面の選択がキャンセル(または拒否)されました。\nmacOSで毎回失敗する場合は、システム設定 > プライバシーとセキュリティ > 画面収録 でブラウザを許可してください。', 'warn');
     } else {
       setStatus(`画面を取得できませんでした: ${e.name}: ${e.message}`, 'error');
     }
-    return;
+    return null;
   }
-  if (stream) stream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
-  stream = s;
-  s.getVideoTracks()[0].onended = () =>
-    dropStream('画面共有が終了しました。「字幕画面を選択」で再接続できます(字幕ウィンドウは開いたままで構いません)。', 'warn');
-  attach(preview, s);
-  if (out) attach(out.video, s);
-  if (comp) attach(comp.video, s);
-  if (hasFrameless) startCropped(s.getVideoTracks()[0]);
-  updateButtons();
-  const surface = s.getVideoTracks()[0].getSettings().displaySurface;
-  setStatus(
-    surface && surface !== 'browser'
-      ? '取得中(タブ以外を共有しています。CoeFontのタブを選ぶと、タブが裏に回っても更新が止まりにくくなります)。'
-      : '取得中。字幕領域を調整して「字幕を表示」を押してください。',
-    surface && surface !== 'browser' ? 'warn' : ''
-  );
 }
 
-async function show() {
+async function pickSub() {
+  const s = await capture({ frameRate: { ideal: 15, max: 30 } });
+  if (!s) return;
+  setSub(s);
+  const track = s.getVideoTracks()[0];
+  track.onended = () => {
+    setSub(null);
+    setStatus('字幕の画面共有が終了しました。ソースの「選択」で再接続できます(出力の窓は開いたままで構いません)。', 'warn');
+  };
+  const isTab = track.getSettings().displaySurface === 'browser';
+  setStatus(isTab
+    ? '字幕を取得中。左で字幕の範囲を囲み、右で位置を決めてください。'
+    : '字幕を取得中(タブ以外を共有しています。CoeFontのタブを選ぶと、裏に回っても更新が止まりにくくなります)。',
+    isTab ? '' : 'warn');
+}
+
+async function pickSlide() {
+  const s = await capture({ frameRate: { ideal: 30 } });
+  if (!s) return;
+  setSlide(s);
+  const track = s.getVideoTracks()[0];
+  track.onended = () => {
+    setSlide(null);
+    setStatus('スライドの画面共有が終了しました。ソースの「選択」で再接続できます(出力の窓は開いたままで構いません)。', 'warn');
+  };
+  // 画面全体を選ぶと全画面出力自身が映り込んで合わせ鏡になる
+  const isMonitor = track.getSettings().displaySurface === 'monitor';
+  setStatus(isMonitor
+    ? '画面全体が選ばれています。全画面出力と同じディスプレイだと合わせ鏡になるので、スライドショーの「ウィンドウ」を選び直してください。'
+    : 'スライドを取得中。「聴衆用の全画面出力を開く」で表示できます。',
+    isMonitor ? 'warn' : '');
+}
+
+// --- 出力 ---
+function openStage() {
+  if (comp) comp.win.close();
+  const win = window.open('', 'coefont-stage', 'popup,width=960,height=540');
+  if (!win) {
+    setStatus('ポップアップがブロックされました。このサイトのポップアップを許可してください。', 'error');
+    return;
+  }
+  const doc = win.document;
+  doc.title = '聴衆用出力';
+  doc.body.innerHTML = '';
+  doc.body.style.cssText = 'margin:0;height:100vh;overflow:hidden;background:#000;position:relative;';
+  const scene = makeScene(doc, doc.body);
+  const hint = doc.createElement('div');
+  hint.textContent = 'この窓を聴衆側ディスプレイへ移動し、クリックで全画面にする(Escで解除)';
+  hint.style.cssText = 'position:absolute;top:0;left:0;right:0;padding:8px;font:14px system-ui,sans-serif;color:#fff;background:rgba(0,0,0,.7);text-align:center;';
+  doc.body.append(hint);
+
+  const self = { win, scene };
+  comp = self;
+  doc.body.addEventListener('click', () => {
+    if (!doc.fullscreenElement) doc.documentElement.requestFullscreen().catch(() => {});
+  });
+  doc.addEventListener('fullscreenchange', () => {
+    hint.style.display = doc.fullscreenElement ? 'none' : '';
+    // 全画面中はカーソルが聴衆に見えないようにする
+    doc.body.style.cursor = doc.fullscreenElement ? 'none' : '';
+  });
+  win.addEventListener('resize', scene.layout);
+  win.addEventListener('pagehide', () => {
+    if (comp === self) { comp = null; updateUI(); }
+  });
+  attach(scene.slide, slideStream);
+  attach(scene.video, stream);
+  scene.layout();
+  updateUI();
+}
+
+async function showPip() {
   if (!stream) return;
   if (out) out.win.close();
   if (cfg.frameless && hasFrameless) {
@@ -278,7 +401,7 @@ async function show() {
     } catch (e) {
       setStatus(e.name === 'InvalidStateError'
         ? 'まだ映像が届いていません。CoeFont側の画面が一度更新されてからもう一度押してください。'
-        : `字幕ウィンドウを開けませんでした: ${e.name}: ${e.message}`, 'error');
+        : `小窓を開けませんでした: ${e.name}: ${e.message}`, 'error');
     }
     return;
   }
@@ -292,7 +415,7 @@ async function show() {
       ? await documentPictureInPicture.requestWindow({ width, height })
       : window.open('', 'coefont-subtitles', `popup,width=${width},height=${height}`);
   } catch (e) {
-    setStatus(`字幕ウィンドウを開けませんでした: ${e.name}: ${e.message}`, 'error');
+    setStatus(`小窓を開けませんでした: ${e.name}: ${e.message}`, 'error');
     return;
   }
   if (!win) {
@@ -302,7 +425,7 @@ async function show() {
   const doc = win.document;
   doc.title = '字幕';
   doc.body.innerHTML = '';
-  doc.body.style.cssText = 'margin:0;height:100vh;overflow:hidden;display:flex;align-items:center;justify-content:center;';
+  doc.body.style.cssText = 'margin:0;height:100vh;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center;';
   const box = doc.createElement('div');
   box.style.cssText = 'position:relative;overflow:hidden;flex:none;';
   const video = makeVideo(doc, 'position:absolute;max-width:none;');
@@ -315,153 +438,105 @@ async function show() {
   video.addEventListener('loadedmetadata', layoutOut);
   video.addEventListener('resize', layoutOut); // 共有元タブのサイズ変更
   win.addEventListener('pagehide', () => {
-    if (out === self) { out = null; updateButtons(); }
+    if (out === self) { out = null; updateUI(); }
   });
   attach(video, stream);
   layoutOut();
-  updateButtons();
+  updateUI();
 }
 
-async function pickSlide() {
-  let s;
-  try {
-    s = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 30 } },
-      audio: false,
-      selfBrowserSurface: 'exclude',
-    });
-  } catch (e) {
-    if (e.name !== 'NotAllowedError') setStatus(`スライドの画面を取得できませんでした: ${e.name}: ${e.message}`, 'error');
-    return;
-  }
-  if (slideStream) slideStream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
-  slideStream = s;
-  const track = s.getVideoTracks()[0];
-  track.onended = () => {
-    slideStream = null;
-    if (comp) attach(comp.slide, null);
-    updateButtons();
-    setStatus('スライドの画面共有が終了しました。③で選び直せます(合成画面は開いたままで構いません)。', 'warn');
-  };
-  if (comp) attach(comp.slide, s);
-  updateButtons();
-  // 画面全体を選ぶと合成画面自身が映り込んで合わせ鏡になる
-  setStatus(track.getSettings().displaySurface === 'monitor'
-    ? '画面全体が選ばれています。合成画面と同じディスプレイだと映像が合わせ鏡になるので、スライドショーの「ウィンドウ」を選び直してください。'
-    : 'スライドを取得中。④で合成画面を開いてください。',
-    track.getSettings().displaySurface === 'monitor' ? 'warn' : '');
-}
-
-function openStage() {
-  if (comp) comp.win.close();
-  const win = window.open('', 'coefont-stage', 'popup,width=960,height=540');
-  if (!win) {
-    setStatus('ポップアップがブロックされました。このサイトのポップアップを許可してください。', 'error');
-    return;
-  }
-  const doc = win.document;
-  doc.title = '合成画面';
-  doc.body.innerHTML = '';
-  doc.body.style.cssText = 'margin:0;height:100vh;overflow:hidden;background:#000;position:relative;';
-  const slide = makeVideo(doc, 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;');
-  const box = doc.createElement('div');
-  box.style.cssText = 'position:absolute;overflow:hidden;';
-  const video = makeVideo(doc, 'position:absolute;max-width:none;');
-  box.append(video);
-  const hint = doc.createElement('div');
-  hint.textContent = 'この窓を聴衆側ディスプレイへ移動し、クリックで全画面にする(Escで解除)';
-  hint.style.cssText = 'position:absolute;top:0;left:0;right:0;padding:8px;font:14px system-ui,sans-serif;color:#fff;background:rgba(0,0,0,.7);text-align:center;';
-  doc.body.append(slide, box, hint);
-
-  const self = { win, slide, box, video };
-  comp = self;
-  doc.body.addEventListener('click', () => {
-    if (!doc.fullscreenElement) doc.documentElement.requestFullscreen().catch(() => {});
-  });
-  doc.addEventListener('fullscreenchange', () => {
-    hint.style.display = doc.fullscreenElement ? 'none' : '';
-    // 全画面中はカーソルが聴衆に見えないようにする
-    doc.body.style.cursor = doc.fullscreenElement ? 'none' : '';
-  });
-  win.addEventListener('resize', layoutComp);
-  video.addEventListener('loadedmetadata', layoutComp);
-  video.addEventListener('resize', layoutComp);
-  win.addEventListener('pagehide', () => {
-    if (comp === self) { comp = null; updateButtons(); }
-  });
-  attach(slide, slideStream);
-  attach(video, stream);
-  layoutComp();
-  updateButtons();
-}
-
-// --- 切り抜き操作 ---
-let dragStart = null;
-const fracAt = (e) => {
-  const r = stage.getBoundingClientRect();
-  return {
-    x: Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1),
-    y: Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1),
-  };
+// --- 入力側: 切り抜き範囲をドラッグで囲む ---
+let cropStart = null;
+const fracIn = (el, e) => {
+  const r = el.getBoundingClientRect();
+  return { x: clamp((e.clientX - r.left) / r.width, 0, 1), y: clamp((e.clientY - r.top) / r.height, 0, 1) };
 };
 stage.addEventListener('pointerdown', (e) => {
   if (!stream) return;
-  dragStart = fracAt(e);
+  cropStart = fracIn(stage, e);
   stage.setPointerCapture(e.pointerId);
 });
 stage.addEventListener('pointermove', (e) => {
-  if (!dragStart) return;
-  const p = fracAt(e);
+  if (!cropStart) return;
+  const p = fracIn(stage, e);
   // クリックだけで極小の範囲になるのを避ける
-  if (Math.abs(p.x - dragStart.x) < MIN || Math.abs(p.y - dragStart.y) < MIN) return;
-  cfg.x = Math.min(p.x, dragStart.x);
-  cfg.y = Math.min(p.y, dragStart.y);
-  cfg.w = Math.abs(p.x - dragStart.x);
-  cfg.h = Math.abs(p.y - dragStart.y);
+  if (Math.abs(p.x - cropStart.x) < MIN || Math.abs(p.y - cropStart.y) < MIN) return;
+  cfg.x = Math.min(p.x, cropStart.x);
+  cfg.y = Math.min(p.y, cropStart.y);
+  cfg.w = Math.abs(p.x - cropStart.x);
+  cfg.h = Math.abs(p.y - cropStart.y);
   render();
 });
-const endDrag = () => { dragStart = null; };
-stage.addEventListener('pointerup', endDrag);
-stage.addEventListener('pointercancel', endDrag);
+for (const ev of ['pointerup', 'pointercancel']) stage.addEventListener(ev, () => { cropStart = null; });
 
-for (const k of ['x', 'y', 'w', 'h']) {
-  $('s' + k).addEventListener('input', (e) => { cfg[k] = e.target.value / 100; render(); });
-}
-for (const k of STAGE_KEYS) {
-  $(k).addEventListener('input', (e) => { cfg[k] = e.target.value / 100; render(); });
-}
+// --- 出力プレビュー側: 字幕の移動と拡大縮小 ---
+let grab = null;
+gizmo.addEventListener('pointerdown', (e) => {
+  const root = $('canvas');
+  grab = {
+    handle: e.target.dataset.h || '', px: e.clientX, py: e.clientY,
+    W: root.clientWidth, H: root.clientHeight,
+    l: gizmo.offsetLeft, t: gizmo.offsetTop, w: gizmo.offsetWidth, h: gizmo.offsetHeight,
+  };
+  gizmo.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+gizmo.addEventListener('pointermove', (e) => {
+  if (!grab) return;
+  const { handle, W, H, l, t, w, h } = grab;
+  const dx = e.clientX - grab.px, dy = e.clientY - grab.py;
+  if (!handle) {
+    cfg.subX = (l + dx) / W;
+    cfg.subY = (t + dy) / H;
+  } else {
+    // 縦横比は切り抜き範囲で決まるので幅だけ動かし、掴んだ角の対角を固定する
+    const nw = clamp(handle.includes('w') ? w - dx : w + dx, W * 0.1, W);
+    const nh = nw * h / w;
+    cfg.subW = nw / W;
+    cfg.subX = (handle.includes('w') ? l + w - nw : l) / W;
+    cfg.subY = (handle.includes('n') ? t + h - nh : t) / H;
+  }
+  render();
+});
+for (const ev of ['pointerup', 'pointercancel']) gizmo.addEventListener(ev, () => { grab = null; });
+
+// --- 操作 ---
+const actions = {
+  pickSub, pickSlide, openStage, showPip,
+  stopSub: () => { setSub(null); setStatus('字幕の共有を停止しました。'); },
+  stopSlide: () => { setSlide(null); setStatus('スライドの共有を停止しました。'); },
+  resetCrop: () => { Object.assign(cfg, CROP_DEFAULTS); render(); },
+  resetPos: () => { Object.assign(cfg, POS_DEFAULTS); render(); },
+};
+document.addEventListener('click', (e) => {
+  const act = e.target.closest('[data-act]')?.dataset.act;
+  if (act) actions[act]();
+});
 $('blend').addEventListener('change', (e) => { cfg.blend = e.target.value; render(); });
-$('pickSlide').addEventListener('click', pickSlide);
-$('openStage').addEventListener('click', openStage);
-$('bg').addEventListener('input', (e) => { cfg.bg = e.target.value; render(); });
+$('subOpacity').addEventListener('input', (e) => { cfg.subOpacity = e.target.value / 100; render(); });
 $('frameless').addEventListener('change', (e) => { cfg.frameless = e.target.checked; render(); });
-pipVideo.addEventListener('enterpictureinpicture', updateButtons);
-pipVideo.addEventListener('leavepictureinpicture', updateButtons);
-$('reset').addEventListener('click', () => { cfg = { ...cfg, x: DEFAULTS.x, y: DEFAULTS.y, w: DEFAULTS.w, h: DEFAULTS.h }; render(); });
-$('pick').addEventListener('click', pick);
-$('show').addEventListener('click', show);
-$('stop').addEventListener('click', () => dropStream('共有を停止しました。'));
-// このタブを閉じると字幕ウィンドウの映像も止まるので道連れにする
+pipVideo.addEventListener('enterpictureinpicture', updateUI);
+pipVideo.addEventListener('leavepictureinpicture', updateUI);
+// このタブを閉じると出力先の映像も止まるので道連れにする
 window.addEventListener('pagehide', () => { if (out) out.win.close(); if (comp) comp.win.close(); });
 
 // --- 環境判定 ---
+const blockPick = () => document.querySelectorAll('[data-act^=pick]').forEach((b) => { b.disabled = true; });
 if (!window.isSecureContext) {
   setStatus('このページは HTTPS(または localhost)で開く必要があります。', 'error');
-  $('pick').disabled = $('pickSlide').disabled = true;
+  blockPick();
 } else if (!navigator.mediaDevices?.getDisplayMedia) {
   setStatus('このブラウザは画面共有(getDisplayMedia)に対応していません。デスクトップ版の Chrome / Edge を使ってください。', 'error');
-  $('pick').disabled = $('pickSlide').disabled = true;
+  blockPick();
 } else if (!hasDocPiP) {
-  setStatus('このブラウザは Document Picture-in-Picture 非対応です。通常のポップアップウィンドウで表示します(常に最前面にはなりません)。Chrome / Edge 推奨。', 'warn');
+  setStatus('このブラウザは小窓を常に最前面に出せません(Document Picture-in-Picture 非対応)。Chrome / Edge 推奨。', 'warn');
+} else {
+  setStatus(IDLE_STATUS);
 }
-
-if (!hasFrameless) {
-  $('frameless').disabled = true;
-  $('frameless').parentElement.title = 'このブラウザでは使えません';
-}
+if (!hasFrameless) $('frameless').disabled = true;
 
 render();
-updateButtons();
+updateUI();
 </script>
 </body>
 </html>
