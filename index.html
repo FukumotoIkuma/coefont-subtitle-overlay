@@ -46,6 +46,10 @@
   #gizmo i[data-h=se] { right: -7px; bottom: -7px; cursor: nwse-resize; }
   #gizmo i[data-h=ne] { right: -7px; top: -7px; cursor: nesw-resize; }
   #gizmo i[data-h=sw] { left: -7px; bottom: -7px; cursor: nesw-resize; }
+  /* 下に並べる配置では帯の位置と幅が決まっているので、移動と拡大縮小のつまみは出さない */
+  #gizmo.below { cursor: ns-resize; }
+  #gizmo.below i, #gizmo.below b[data-c=b] { display: none; }
+  [hidden] { display: none !important; }
   #note { position: absolute; left: 0; right: 0; top: 0; padding: 10px; text-align: center; color: #999; pointer-events: none; }
 
   #foot { margin-top: 10px; display: flex; justify-content: space-between; gap: 12px; }
@@ -56,7 +60,7 @@
 <div id="status"></div>
 
 <div id="stage">
-  <div id="gizmo"><span>字幕(実物は出力側に表示)</span><b data-c="t"></b><b data-c="b"></b><b data-c="l"></b><b data-c="r"></b><i data-h="nw"></i><i data-h="ne"></i><i data-h="sw"></i><i data-h="se"></i></div>
+  <div id="gizmo"><span id="gizmoLabel"></span><b data-c="t"></b><b data-c="b"></b><b data-c="l"></b><b data-c="r"></b><i data-h="nw"></i><i data-h="ne"></i><i data-h="sw"></i><i data-h="se"></i></div>
   <div id="note"></div>
 </div>
 
@@ -73,18 +77,24 @@
   </div>
 
   <div class="dock">
-    <h2>字幕の見た目</h2>
-    <div class="row"><label for="blend">背景の透過</label>
+    <h2>レイアウトと字幕</h2>
+    <div class="row"><label for="layoutSel">配置</label>
+      <select id="layoutSel">
+        <option value="overlay">スライドに重ねる</option>
+        <option value="below">スライドの下に並べる</option>
+      </select></div>
+    <div class="row" id="rowBand"><label for="band">字幕の帯の高さ</label><input type="range" id="band" min="8" max="50" step="0.5"><output id="oBand"></output></div>
+    <div class="row" id="rowBlend"><label for="blend">背景の透過</label>
       <select id="blend">
         <option value="normal">なし</option>
         <option value="multiply">白地を抜く(暗い文字用)</option>
         <option value="screen">黒地を抜く(明るい文字用)</option>
       </select></div>
-    <div class="row"><label for="subOpacity">不透明度</label><input type="range" id="subOpacity" min="20" max="100"><output id="oOpacity"></output></div>
+    <div class="row" id="rowOpacity"><label for="subOpacity">不透明度</label><input type="range" id="subOpacity" min="20" max="100"><output id="oOpacity"></output></div>
     <div class="row"><label for="textSize">文字の大きさ</label><input type="range" id="textSize" min="400" max="1600" step="20"></div>
-    <div class="row"><label for="frameH">表示する行数</label><input type="range" id="frameH" min="150" max="900" step="5"></div>
-    <div class="row"><button data-act="resetCrop">切り抜きを初期化</button><button data-act="resetPos">配置を初期化</button></div>
-    <div class="hint">プレビューの字幕の枠: 中をドラッグで移動、赤い角で拡大縮小、青い辺で切り抜き。</div>
+    <div class="row" id="rowFrameH"><label for="frameH">表示する行数</label><input type="range" id="frameH" min="150" max="900" step="5"></div>
+    <div class="row"><button data-act="resetCrop">切り抜きを初期化</button><button data-act="resetPos" id="btnResetPos">配置を初期化</button></div>
+    <div class="hint" id="gizmoHint"></div>
   </div>
 
   <div class="dock">
@@ -110,7 +120,12 @@ const URL_KEY = 'coefont-subtitle-overlay:url';
 // 切り抜きは割合ではなく四辺からの余白(px)で持つ。こうすると描く大きさを変えても切った位置がずれない
 const CROP_DEFAULTS = { fw: 960, fh: 540, it: 0, il: 0, ir: 0, ib: 0 };
 const POS_DEFAULTS = { subX: 0.25, subY: 0.4, subW: 0.5 };
-const DEFAULTS = { ...CROP_DEFAULTS, ...POS_DEFAULTS, subOpacity: 1, blend: 'normal' };
+// band: 「下に並べる」配置で字幕の帯が占める高さの割合
+const DEFAULTS = { ...CROP_DEFAULTS, ...POS_DEFAULTS, subOpacity: 1, blend: 'normal', layout: 'overlay', band: 0.22 };
+const LAYOUTS = ['overlay', 'below'];
+const BAND_RANGE = [0.08, 0.5];
+// 「下に並べる」配置ではCoeFontを描く高さが帯から決まるので、上下の切り抜きはこの範囲で受ける
+const MAX_INSET = 900;
 const BLENDS = ['normal', 'multiply', 'screen'];
 const FW_RANGE = [400, 1600];
 const MIN_PX = 40;
@@ -167,8 +182,11 @@ function normalize() {
   cfg.fh = clamp(cfg.fh, 150, 900);
   cfg.il = clamp(cfg.il, 0, cfg.fw - MIN_PX);
   cfg.ir = clamp(cfg.ir, 0, cfg.fw - cfg.il - MIN_PX);
-  cfg.it = clamp(cfg.it, 0, cfg.fh - MIN_PX);
-  cfg.ib = clamp(cfg.ib, 0, cfg.fh - cfg.it - MIN_PX);
+  if (!LAYOUTS.includes(cfg.layout)) cfg.layout = DEFAULTS.layout;
+  cfg.band = clamp(cfg.band, ...BAND_RANGE);
+  const below = cfg.layout === 'below';
+  cfg.it = clamp(cfg.it, 0, below ? MAX_INSET : cfg.fh - MIN_PX);
+  cfg.ib = clamp(cfg.ib, 0, below ? MAX_INSET : cfg.fh - cfg.it - MIN_PX);
   cfg.subW = clamp(cfg.subW, 0.1, 1);
   cfg.subX = clamp(cfg.subX, 0, 1 - cfg.subW);
   cfg.subY = clamp(cfg.subY, 0, 0.98);
@@ -218,35 +236,47 @@ function layoutScene(sc) {
   sc.shade.style.display = composing ? 'none' : '';
   sc.sub.style.display = url ? '' : 'none';
   // 出力先の大きさでCoeFont側のレイアウトが変わると切り抜きがずれるので、決めた大きさで描かせて拡大縮小だけする
+  const below = cfg.layout === 'below';
+  const cw = cfg.fw - cfg.il - cfg.ir;
+  // 下に並べる配置では、切り抜いた残りが帯をちょうど埋める高さでCoeFontを描かせる(帯に余白も欠けも出さない)
+  const fh = below ? cfg.it + cfg.ib + cw * cfg.band * H / W : cfg.fh;
+  const ch = fh - cfg.it - cfg.ib;
   sc.content.style.width = cfg.fw + 'px';
-  sc.content.style.height = cfg.fh + 'px';
-  const cw = cfg.fw - cfg.il - cfg.ir, ch = cfg.fh - cfg.it - cfg.ib;
+  sc.content.style.height = fh + 'px';
+  // 下に並べる配置では、スライドを帯の上の領域に縮めて収める
+  sc.slide.style.height = composing && below ? (1 - cfg.band) * 100 + '%' : '';
 
   let scale, box, shift = [0, 0];
-  if (composing) {
+  if (composing && below) {
+    scale = W / cw;
+    box = { left: 0, top: H * (1 - cfg.band), width: W, height: H * cfg.band };
+    shift = [-cfg.il, -cfg.it];
+  } else if (composing) {
     const width = cfg.subW * W;
     scale = width / cw;
     box = { left: cfg.subX * W, top: cfg.subY * H, width, height: ch * scale };
     shift = [-cfg.il, -cfg.it];
   } else {
     // CoeFont自体の設定は、切り抜く前の全体を見せて行う
-    scale = Math.min(W / cfg.fw, H / cfg.fh);
-    box = { left: (W - cfg.fw * scale) / 2, top: (H - cfg.fh * scale) / 2, width: cfg.fw * scale, height: cfg.fh * scale };
+    scale = Math.min(W / cfg.fw, H / fh);
+    box = { left: (W - cfg.fw * scale) / 2, top: (H - fh * scale) / 2, width: cfg.fw * scale, height: fh * scale };
   }
   for (const k in box) sc.sub.style[k] = sc.outline.style[k] = box[k] + 'px';
   sc.outline.style.display = sc.real && adjusting && composing && url ? '' : 'none';
   sc.content.style.transform = `scale(${scale}) translate(${shift[0]}px, ${shift[1]}px)`;
   sc.crop.style.display = composing ? 'none' : '';
   sc.sel.style.left = cfg.il / cfg.fw * 100 + '%';
-  sc.sel.style.top = cfg.it / cfg.fh * 100 + '%';
+  sc.sel.style.top = cfg.it / fh * 100 + '%';
   sc.sel.style.width = cw / cfg.fw * 100 + '%';
-  sc.sel.style.height = ch / cfg.fh * 100 + '%';
+  sc.sel.style.height = ch / fh * 100 + '%';
   if (sc.real) {
     // 開始ボタンは字幕欄の中に出るので、字幕表示のままでも押せるようにしておく。全画面で見せている間だけ触れなくする
     sc.content.style.pointerEvents = sc.doc.fullscreenElement && composing ? 'none' : 'auto';
     // 下地のスライドがないまま白地や黒地を抜くと、黒い背景に溶けて字幕ごと見えなくなる
-    sc.sub.style.mixBlendMode = composing && slideStream ? cfg.blend : 'normal';
-    sc.sub.style.opacity = composing ? cfg.subOpacity : 1;
+    // 透過と不透明度は下地のスライドと重なるときだけ意味がある
+    const overlaid = composing && !below;
+    sc.sub.style.mixBlendMode = overlaid && slideStream ? cfg.blend : 'normal';
+    sc.sub.style.opacity = overlaid ? cfg.subOpacity : 1;
     // 全画面で字幕を出している間はカーソルを聴衆に見せない
     sc.root.style.cursor = sc.doc.fullscreenElement && composing ? 'none' : '';
   }
@@ -264,10 +294,11 @@ function layout() {
   stage.style.maxWidth = `min(1100px, ${55 * ratio}vh)`;
   const box = layoutScene(ctl);
   gizmo.style.display = url ? 'block' : 'none';
+  gizmo.classList.toggle('below', cfg.layout === 'below');
   for (const k in box) gizmo.style[k] = box[k] + 'px';
   if (out) layoutScene(out.scene);
   $('note').textContent = !url ? '「ソース」に CoeFont の招待URLを貼って読み込む'
-    : !slideStream ? 'スライド未選択(聴衆には黒い背景に字幕だけが見える。透過はスライドを選ぶと効く)' : '';
+    : !slideStream ? 'スライド未選択(聴衆には黒い背景に字幕だけが見える)' : '';
 }
 new ResizeObserver(layout).observe(stage);
 
@@ -279,6 +310,16 @@ function render() {
   // 狭く描かせるほど、同じ字幕枠に対して文字が大きく映る
   $('textSize').value = FW_RANGE[0] + FW_RANGE[1] - cfg.fw;
   $('frameH').value = cfg.fh;
+  const below = cfg.layout === 'below';
+  $('layoutSel').value = cfg.layout;
+  $('band').value = cfg.band * 100;
+  $('oBand').textContent = Math.round(cfg.band * 100) + '%';
+  $('rowBand').hidden = !below;
+  for (const id of ['rowBlend', 'rowOpacity', 'rowFrameH', 'btnResetPos']) $(id).hidden = below;
+  $('gizmoLabel').textContent = below ? '字幕の帯(実物は出力側に表示)' : '字幕(実物は出力側に表示)';
+  $('gizmoHint').textContent = below
+    ? 'プレビューの字幕の帯: 上下にドラッグで帯の高さ、青い辺で切り抜き。'
+    : 'プレビューの字幕の枠: 中をドラッグで移動、赤い角で拡大縮小、青い辺で切り抜き。';
   const fullLabel = full ? '字幕表示に戻す' : 'CoeFont の画面全体を表示';
   $('btnFull').textContent = '出力側: ' + fullLabel;
   $('btnFull').disabled = !out;
@@ -410,7 +451,7 @@ async function pickSlide() {
   } else if (surface === 'monitor') {
     setStatus('画面全体が選ばれています。出力ウィンドウと同じディスプレイだと合わせ鏡になるので、スライドショーの「ウィンドウ」を選び直してください。', 'warn');
   } else {
-    setStatus('スライドを取得中。赤枠を動かして字幕の位置を決めてください。');
+    setStatus('スライドを取得中。プレビューで字幕の位置を決めてください。');
   }
 }
 
@@ -444,7 +485,14 @@ gizmo.addEventListener('pointermove', (e) => {
   if (!grab) return;
   const { handle, edge, start, W, H, l, t, w, h } = grab;
   const dx = e.clientX - grab.px, dy = e.clientY - grab.py;
-  if (edge) {
+  if (cfg.layout === 'below') {
+    // 帯は位置も幅も固定なので、辺は切り抜く量だけを、帯そのもののドラッグは高さだけを変える
+    const scale = W / (start.fw - start.il - start.ir);
+    if (edge === 't') cfg.it = start.it + dy / scale;
+    else if (edge === 'l') cfg.il = start.il + dx / scale;
+    else if (edge === 'r') cfg.ir = start.ir - dx / scale;
+    else cfg.band = start.band - dy / H;
+  } else if (edge) {
     // 切り抜きでは拡大率を変えず、つかんだ辺だけがマウスに付いてくるようにする(反対側の辺と中身は動かさない)
     const cw = start.fw - start.il - start.ir, ch = start.fh - start.it - start.ib;
     const scale = w / cw;
@@ -492,6 +540,8 @@ document.addEventListener('click', (e) => {
 });
 $('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadUrl(); });
 $('blend').addEventListener('change', (e) => { cfg.blend = e.target.value; render(); });
+$('layoutSel').addEventListener('change', (e) => { cfg.layout = e.target.value; markAdjusting(false); render(); });
+$('band').addEventListener('input', (e) => { markAdjusting(false); cfg.band = e.target.value / 100; render(); });
 $('textSize').addEventListener('input', (e) => { markAdjusting(false); cfg.fw = FW_RANGE[0] + FW_RANGE[1] - e.target.value; render(); });
 $('frameH').addEventListener('input', (e) => { markAdjusting(false); cfg.fh = +e.target.value; render(); });
 $('subOpacity').addEventListener('input', (e) => { cfg.subOpacity = e.target.value / 100; render(); });
