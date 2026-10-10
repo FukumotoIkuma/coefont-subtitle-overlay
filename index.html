@@ -46,7 +46,7 @@
   #gizmo i[data-h=se] { right: -7px; bottom: -7px; cursor: nwse-resize; }
   #gizmo i[data-h=ne] { right: -7px; top: -7px; cursor: nesw-resize; }
   #gizmo i[data-h=sw] { left: -7px; bottom: -7px; cursor: nesw-resize; }
-  /* 下に並べる配置では字幕は領域に収まる大きさで中央に置かれるので、移動と拡大縮小のつまみは出さない */
+  /* 並べる配置(下・左右)では字幕は領域に収まる大きさで中央に置かれるので、移動と拡大縮小のつまみは出さない */
   #gizmo.split { cursor: default; }
   #gizmo.split i { display: none; }
   /* 字幕が領域いっぱいのとき、辺のつまみが境界線と重なって掴めなくなるので内側へずらす */
@@ -137,12 +137,25 @@ const CROP_DEFAULTS = { fw: 960, fh: 540, it: 0, il: 0, ir: 0, ib: 0 };
 const POS_DEFAULTS = { subX: 0.25, subY: 0.4, subW: 0.5 };
 // band: 並べる配置で字幕の領域が占める割合(下なら高さ、左右なら幅)。境界の位置だけを表し、CoeFontの切り抜きとは無関係
 const DEFAULTS = { ...CROP_DEFAULTS, ...POS_DEFAULTS, subOpacity: 1, blend: 'normal', layout: 'overlay', band: 0.22 };
-const LAYOUTS = ['overlay', 'below', 'right', 'left'];
+// 並べる配置の定義。axis: 境界線が区切る向き(x=左右, y=上下)、subFirst: 字幕の領域が先(左/上)に来るか。
+// 領域の計算も境界線の向きもドラッグもここから導くので、配置を増やすときはここに1行足せば足りる
+const SPLITS = {
+  below: { axis: 'y', subFirst: false },
+  right: { axis: 'x', subFirst: false },
+  left: { axis: 'x', subFirst: true },
+};
+const LAYOUTS = ['overlay', ...Object.keys(SPLITS)];
+const RECT_KEYS = ['left', 'top', 'width', 'height'];
 const BAND_RANGE = [0.08, 0.6];
 const BLENDS = ['normal', 'multiply', 'screen'];
 // CoeFontを描く窓の大きさ(px)。左右に並べる配置では縦長にしたいので、高さは幅より大きく取れるようにしておく
+// 高さの下限を低くしてあるのは、下に並べる配置の細い領域に形を合わせると100px前後になるため
 const WIN_W_RANGE = [300, 1600];
-const WIN_H_RANGE = [150, 2000];
+const WIN_H_RANGE = [60, 2000];
+const WINDOW_SLIDERS = [
+  { input: 'winW', output: 'oWinW', key: 'fw', range: WIN_W_RANGE },
+  { input: 'winH', output: 'oWinH', key: 'fh', range: WIN_H_RANGE },
+];
 const MIN_PX = 40;
 // 手元のプレビューと出力ウィンドウは別文書なので、同じ見た目の定義を両方へ差し込む
 const SCENE_CSS = `
@@ -180,6 +193,7 @@ let out = null; // 出力ウィンドウ { win, scene }
 const stage = $('stage');
 const gizmo = $('gizmo');
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+const isSplit = () => cfg.layout in SPLITS;
 
 function setStatus(text, kind = '') {
   $('status').textContent = text;
@@ -193,14 +207,18 @@ function addStyle(doc, css) {
 }
 
 function normalize() {
-  cfg.fw = clamp(cfg.fw, ...WIN_W_RANGE);
-  cfg.fh = clamp(cfg.fh, ...WIN_H_RANGE);
+  for (const k of ['il', 'ir', 'it', 'ib']) cfg[k] = Math.max(0, +cfg[k] || 0);
+  // 窓を縮めても切り抜きは変えない。切り抜きを詰めて合わせると、窓を戻しても切った位置が元に戻らないので、
+  // 切り抜きが収まらなくなる大きさには窓のほうを縮めさせない
+  cfg.fw = clamp(Math.max(cfg.fw, cfg.il + cfg.ir + MIN_PX), ...WIN_W_RANGE);
+  cfg.fh = clamp(Math.max(cfg.fh, cfg.it + cfg.ib + MIN_PX), ...WIN_H_RANGE);
+  // ここから4行は、保存値が壊れていて窓の上限でも切り抜きが収まらないときだけ効く保険
   cfg.il = clamp(cfg.il, 0, cfg.fw - MIN_PX);
   cfg.ir = clamp(cfg.ir, 0, cfg.fw - cfg.il - MIN_PX);
-  if (!LAYOUTS.includes(cfg.layout)) cfg.layout = DEFAULTS.layout;
-  cfg.band = clamp(cfg.band, ...BAND_RANGE);
   cfg.it = clamp(cfg.it, 0, cfg.fh - MIN_PX);
   cfg.ib = clamp(cfg.ib, 0, cfg.fh - cfg.it - MIN_PX);
+  if (!LAYOUTS.includes(cfg.layout)) cfg.layout = DEFAULTS.layout;
+  cfg.band = clamp(cfg.band, ...BAND_RANGE);
   cfg.subW = clamp(cfg.subW, 0.1, 1);
   cfg.subX = clamp(cfg.subX, 0, 1 - cfg.subW);
   cfg.subY = clamp(cfg.subY, 0, 0.98);
@@ -238,16 +256,23 @@ function makeScene(doc, root, real) {
   outline.className = 'outline';
   root.prepend(slide, shade, sub, outline);
   for (const ev of ['loadedmetadata', 'resize', 'emptied']) slide.addEventListener(ev, layout);
-  return { doc, root, slide, shade, sub, content, crop, sel, outline, real };
+  // origin: いま窓の左上がどこにどの拡大率で置かれているか。frozen: 切り抜きの辺を掴んでいる間、収め直しを止めるために控えたorigin
+  return { doc, root, slide, shade, sub, content, crop, sel, outline, real, origin: null, frozen: null };
 }
 
-// 並べる配置での、スライドの領域と字幕の領域 [x, y, 幅, 高さ]。重ねる配置では分けないので null
+// 並べる配置での、スライドの領域と字幕の領域。重ねる配置では分けないので null
 function regions(W, H) {
-  const b = cfg.band;
-  if (cfg.layout === 'below') return { slide: [0, 0, W, H * (1 - b)], sub: [0, H * (1 - b), W, H * b] };
-  if (cfg.layout === 'right') return { slide: [0, 0, W * (1 - b), H], sub: [W * (1 - b), 0, W * b, H] };
-  if (cfg.layout === 'left') return { slide: [W * b, 0, W * (1 - b), H], sub: [0, 0, W * b, H] };
-  return null;
+  const sp = SPLITS[cfg.layout];
+  if (!sp) return null;
+  const horizontal = sp.axis === 'x';
+  const total = horizontal ? W : H;
+  const subLen = total * cfg.band;
+  const along = (start, len) => horizontal
+    ? { left: start, top: 0, width: len, height: H }
+    : { left: 0, top: start, width: W, height: len };
+  return sp.subFirst
+    ? { sub: along(0, subLen), slide: along(subLen, total - subLen) }
+    : { slide: along(0, total - subLen), sub: along(total - subLen, subLen) };
 }
 
 function layoutScene(sc) {
@@ -258,21 +283,26 @@ function layoutScene(sc) {
   // 映像には触らず、上に黒い幕を掛けて隠す
   sc.shade.style.display = composing ? 'none' : '';
   sc.sub.style.display = url ? '' : 'none';
-  // 出力先の大きさでCoeFont側のレイアウトが変わると切り抜きがずれるので、決めた大きさで描かせて拡大縮小だけする
   const split = composing ? regions(W, H) : null;
   const fh = cfg.fh;
   const cw = cfg.fw - cfg.il - cfg.ir, ch = fh - cfg.it - cfg.ib;
+  // 出力先の大きさでCoeFont側のレイアウトが変わると切り抜きがずれるので、決めた大きさで描かせて拡大縮小だけする
   sc.content.style.width = cfg.fw + 'px';
   sc.content.style.height = fh + 'px';
   // 並べる配置では、スライドを自分の領域に縮めて収める(空にするとCSSの全面表示に戻る)
-  ['left', 'top', 'width', 'height'].forEach((k, i) => { sc.slide.style[k] = split ? split.slide[i] + 'px' : ''; });
+  for (const k of RECT_KEYS) sc.slide.style[k] = split ? split.slide[k] + 'px' : '';
 
   let scale, box, shift = [0, 0];
-  if (split) {
+  if (split && sc.frozen) {
+    // 切り抜きの辺を掴んでいる間は収め直さない。毎回収め直すと枠全体が動いて、掴んだ辺がマウスに付いてこなくなる
+    scale = sc.frozen.scale;
+    box = { left: sc.frozen.left + cfg.il * scale, top: sc.frozen.top + cfg.it * scale, width: cw * scale, height: ch * scale };
+    shift = [-cfg.il, -cfg.it];
+  } else if (split) {
     // 見せる範囲は利用者が決めた切り抜きのまま。領域に合わせて切り足しはせず、収まる大きさに拡大縮小して中央に置く
-    const [rx, ry, rw, rh] = split.sub;
-    scale = Math.min(rw / cw, rh / ch);
-    box = { left: rx + (rw - cw * scale) / 2, top: ry + (rh - ch * scale) / 2, width: cw * scale, height: ch * scale };
+    const r = split.sub;
+    scale = Math.min(r.width / cw, r.height / ch);
+    box = { left: r.left + (r.width - cw * scale) / 2, top: r.top + (r.height - ch * scale) / 2, width: cw * scale, height: ch * scale };
     shift = [-cfg.il, -cfg.it];
   } else if (composing) {
     const width = cfg.subW * W;
@@ -284,6 +314,7 @@ function layoutScene(sc) {
     scale = Math.min(W / cfg.fw, H / fh);
     box = { left: (W - cfg.fw * scale) / 2, top: (H - fh * scale) / 2, width: cfg.fw * scale, height: fh * scale };
   }
+  sc.origin = { scale, left: box.left + shift[0] * scale, top: box.top + shift[1] * scale };
   for (const k in box) sc.sub.style[k] = sc.outline.style[k] = box[k] + 'px';
   sc.outline.style.display = sc.real && adjusting && composing && url ? '' : 'none';
   sc.content.style.transform = `scale(${scale}) translate(${shift[0]}px, ${shift[1]}px)`;
@@ -307,6 +338,7 @@ function layoutScene(sc) {
 }
 
 const ctl = makeScene(document, stage, false);
+const scenes = () => (out ? [ctl, out.scene] : [ctl]);
 addStyle(document, SCENE_CSS);
 
 function layout() {
@@ -317,13 +349,16 @@ function layout() {
   stage.style.maxWidth = `min(1100px, ${55 * ratio}vh)`;
   const box = layoutScene(ctl);
   gizmo.style.display = url ? 'block' : 'none';
-  const side = cfg.layout === 'right' || cfg.layout === 'left';
-  gizmo.classList.toggle('split', cfg.layout !== 'overlay');
+  const sp = SPLITS[cfg.layout];
+  gizmo.classList.toggle('split', !!sp);
   const div = $('divider');
-  div.hidden = cfg.layout === 'overlay';
-  div.className = side ? 'v' : 'h';
-  div.style.top = side ? '' : (1 - cfg.band) * 100 + '%';
-  div.style.left = side ? (cfg.layout === 'right' ? 1 - cfg.band : cfg.band) * 100 + '%' : '';
+  div.hidden = !sp;
+  if (sp) {
+    const at = (sp.subFirst ? cfg.band : 1 - cfg.band) * 100 + '%';
+    div.className = sp.axis === 'x' ? 'v' : 'h';
+    div.style.left = sp.axis === 'x' ? at : '';
+    div.style.top = sp.axis === 'x' ? '' : at;
+  }
   for (const k in box) gizmo.style[k] = box[k] + 'px';
   if (out) layoutScene(out.scene);
   $('note').textContent = !url ? '「ソース」に CoeFont の招待URLを貼って読み込む'
@@ -336,14 +371,12 @@ function render() {
   $('blend').value = cfg.blend;
   $('subOpacity').value = cfg.subOpacity * 100;
   $('oOpacity').textContent = Math.round(cfg.subOpacity * 100) + '%';
-  for (const [id, key, range] of [['winW', 'fw', WIN_W_RANGE], ['winH', 'fh', WIN_H_RANGE]]) {
-    [$(id).min, $(id).max] = range;
-    $(id).value = cfg[key];
-    $('o' + id[0].toUpperCase() + id.slice(1)).textContent = Math.round(cfg[key]) + 'px';
+  for (const { input, output, key } of WINDOW_SLIDERS) {
+    $(input).value = cfg[key];
+    $(output).textContent = Math.round(cfg[key]) + 'px';
   }
-  const split = cfg.layout !== 'overlay';
-  const side = cfg.layout === 'right' || cfg.layout === 'left';
-  $('bandLabel').textContent = side ? '字幕の領域の幅' : '字幕の領域の高さ';
+  const split = isSplit();
+  $('bandLabel').textContent = SPLITS[cfg.layout]?.axis === 'x' ? '字幕の領域の幅' : '字幕の領域の高さ';
   $('layoutSel').value = cfg.layout;
   $('band').value = cfg.band * 100;
   $('oBand').textContent = Math.round(cfg.band * 100) + '%';
@@ -497,16 +530,23 @@ function markAdjusting(holding) {
 
 // 窓の形を変えるのは利用者が押したときだけ。切り抜きには触らず、切り抜いた残りが領域と同じ縦横比になる高さへ窓を変える
 function fitWindow() {
-  const r = regions(stage.clientWidth, stage.clientHeight);
+  // 聴衆が見るのは出力側なので、開いていればその画面の形に合わせる(手元のプレビューとは縦横比が違うことがある)
+  const onOutput = !!(out && out.scene.root.clientWidth && out.scene.root.clientHeight);
+  const root = onOutput ? out.scene.root : stage;
+  const r = regions(root.clientWidth, root.clientHeight);
   if (!r) return;
-  const [, , rw, rh] = r.sub;
-  cfg.fh = cfg.it + cfg.ib + (cfg.fw - cfg.il - cfg.ir) * rh / rw;
+  const wanted = cfg.it + cfg.ib + (cfg.fw - cfg.il - cfg.ir) * r.sub.height / r.sub.width;
+  cfg.fh = wanted;
   markAdjusting(false);
   render();
-  const reached = Math.abs(cfg.fh - WIN_H_RANGE[0]) < 1 || Math.abs(cfg.fh - WIN_H_RANGE[1]) < 1;
-  setStatus(reached
-    ? '窓の高さが上限か下限に達したため、領域の形に合わせきれていません。窓の幅か、字幕の領域の大きさを変えてください。'
-    : `CoeFont の窓を ${Math.round(cfg.fw)}×${Math.round(cfg.fh)}px にして、字幕の領域の形に合わせました。`, reached ? 'warn' : '');
+  const size = `${Math.round(cfg.fw)}×${Math.round(cfg.fh)}px`;
+  if (Math.abs(cfg.fh - wanted) >= 0.5) {
+    setStatus(`窓の高さを ${Math.round(wanted)}px にすると合いますが、指定できる範囲(${WIN_H_RANGE[0]}〜${WIN_H_RANGE[1]}px)の外です。${size} で止めました。窓の幅か、字幕の領域の大きさを変えてからもう一度押してください。`, 'warn');
+  } else if (onOutput) {
+    setStatus(`CoeFont の窓を ${size} にして、出力側の今の画面の形に合わせました。出力を全画面にする前に押した場合は、全画面にしたあとでもう一度押すと正確に合います。`);
+  } else {
+    setStatus(`CoeFont の窓を ${size} にして、プレビューの形に合わせました。出力を開いたあとに押すと、出力側の画面の形に合わせます。`);
+  }
 }
 
 function toggleFull() {
@@ -526,39 +566,42 @@ gizmo.addEventListener('pointerdown', (e) => {
   gizmo.setPointerCapture(e.pointerId);
   e.preventDefault();
   markAdjusting(true);
+  if (grab.edge && isSplit()) for (const sc of scenes()) sc.frozen = sc.origin;
   layout();
 });
 gizmo.addEventListener('pointermove', (e) => {
   if (!grab) return;
   const { handle, edge, start, W, H, l, t, w, h } = grab;
   const dx = e.clientX - grab.px, dy = e.clientY - grab.py;
-  if (cfg.layout !== 'overlay') {
-    // 字幕は領域に収まるよう自動で置かれるので、ここで変えられるのは切り抜きだけ。境界の位置は別の線(divider)で動かす
-    const scale = w / (start.fw - start.il - start.ir);
-    if (edge === 't') cfg.it = start.it + dy / scale;
-    else if (edge === 'b') cfg.ib = start.ib - dy / scale;
-    else if (edge === 'l') cfg.il = start.il + dx / scale;
-    else if (edge === 'r') cfg.ir = start.ir - dx / scale;
-  } else if (edge) {
-    // 切り抜きでは拡大率を変えず、つかんだ辺だけがマウスに付いてくるようにする(反対側の辺と中身は動かさない)
+  if (edge) {
+    // 拡大率を変えず、つかんだ辺だけがマウスに付いてくるようにする。反対側の切り抜きを越えない範囲で止めるので、
+    // 掴んでいない辺の切り抜きには影響しない
     const cw = start.fw - start.il - start.ir, ch = start.fh - start.it - start.ib;
     const scale = w / cw;
+    let d;
     if (edge === 't') {
-      const d = clamp(dy / scale, -start.it, ch - MIN_PX);
+      d = clamp(dy / scale, -start.it, ch - MIN_PX);
       cfg.it = start.it + d;
-      cfg.subY = start.subY + d * scale / H;
     } else if (edge === 'b') {
-      cfg.ib = start.ib - clamp(dy / scale, -(ch - MIN_PX), start.ib);
+      d = clamp(dy / scale, -(ch - MIN_PX), start.ib);
+      cfg.ib = start.ib - d;
     } else if (edge === 'l') {
-      const d = clamp(dx / scale, -start.il, cw - MIN_PX);
+      d = clamp(dx / scale, -start.il, cw - MIN_PX);
       cfg.il = start.il + d;
-      cfg.subX = start.subX + d * scale / W;
-      cfg.subW = (cw - d) * scale / W;
     } else {
-      const d = clamp(dx / scale, -(cw - MIN_PX), start.ir);
+      d = clamp(dx / scale, -(cw - MIN_PX), start.ir);
       cfg.ir = start.ir - d;
-      cfg.subW = (cw + d) * scale / W;
     }
+    // 重ねる配置は枠の位置と幅を設定として持っているので、中身と反対側の辺が動かないよう合わせて直す。
+    // 並べる配置は掴んでいる間の収め直しを止めてあるので、切り抜きを変えるだけでよい
+    if (!isSplit()) {
+      if (edge === 't') cfg.subY = start.subY + d * scale / H;
+      else if (edge === 'l') { cfg.subX = start.subX + d * scale / W; cfg.subW = (cw - d) * scale / W; }
+      else if (edge === 'r') cfg.subW = (cw + d) * scale / W;
+    }
+  } else if (isSplit()) {
+    // 並べる配置では字幕は領域に収まるよう自動で置かれるので、移動も拡大縮小もない
+    return;
   } else if (!handle) {
     cfg.subX = (l + dx) / W;
     cfg.subY = (t + dy) / H;
@@ -572,7 +615,13 @@ gizmo.addEventListener('pointermove', (e) => {
   }
   render();
 });
-for (const ev of ['pointerup', 'pointercancel']) gizmo.addEventListener(ev, () => { grab = null; markAdjusting(false); });
+for (const ev of ['pointerup', 'pointercancel']) gizmo.addEventListener(ev, () => {
+  grab = null;
+  // 離したら、新しい切り抜きで領域に収め直す
+  for (const sc of scenes()) sc.frozen = null;
+  markAdjusting(false);
+  layout();
+});
 
 // --- 並べる配置: スライドと字幕の境界線 ---
 const divider = $('divider');
@@ -585,9 +634,11 @@ divider.addEventListener('pointerdown', (e) => {
 });
 divider.addEventListener('pointermove', (e) => {
   if (!dividing) return;
+  const sp = SPLITS[cfg.layout];
+  if (!sp) return;
   const r = stage.getBoundingClientRect();
-  const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
-  cfg.band = cfg.layout === 'below' ? 1 - fy : cfg.layout === 'right' ? 1 - fx : fx;
+  const f = sp.axis === 'x' ? (e.clientX - r.left) / r.width : (e.clientY - r.top) / r.height;
+  cfg.band = sp.subFirst ? f : 1 - f;
   render();
 });
 for (const ev of ['pointerup', 'pointercancel']) divider.addEventListener(ev, () => { dividing = false; markAdjusting(false); });
@@ -607,8 +658,10 @@ $('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadUrl(); 
 $('blend').addEventListener('change', (e) => { cfg.blend = e.target.value; render(); });
 $('layoutSel').addEventListener('change', (e) => { cfg.layout = e.target.value; markAdjusting(false); render(); });
 $('band').addEventListener('input', (e) => { markAdjusting(false); cfg.band = e.target.value / 100; render(); });
-$('winW').addEventListener('input', (e) => { markAdjusting(false); cfg.fw = +e.target.value; render(); });
-$('winH').addEventListener('input', (e) => { markAdjusting(false); cfg.fh = +e.target.value; render(); });
+for (const { input, key, range } of WINDOW_SLIDERS) {
+  [$(input).min, $(input).max] = range;
+  $(input).addEventListener('input', (e) => { markAdjusting(false); cfg[key] = +e.target.value; render(); });
+}
 $('subOpacity').addEventListener('input', (e) => { cfg.subOpacity = e.target.value / 100; render(); });
 // このタブを閉じると出力ウィンドウを操作できなくなるので道連れにする
 window.addEventListener('pagehide', () => { if (out) out.win.close(); });
