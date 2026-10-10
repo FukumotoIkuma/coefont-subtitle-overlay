@@ -310,7 +310,8 @@ function setSlide(s) {
 
 async function capture(video) {
   try {
-    return await navigator.mediaDevices.getDisplayMedia({ video, audio: false, selfBrowserSurface: 'exclude', surfaceSwitching: 'include' });
+    // surfaceSwitchingを許可すると「代わりにこのタブを共有」の帯が全タブ(聴衆用の出力窓にも)に出るので切る
+    return await navigator.mediaDevices.getDisplayMedia({ video, audio: false, selfBrowserSurface: 'exclude', surfaceSwitching: 'exclude' });
   } catch (e) {
     if (e.name === 'NotAllowedError') {
       setStatus('画面の選択がキャンセル(または拒否)されました。\nmacOSで毎回失敗する場合は、システム設定 > プライバシーとセキュリティ > 画面収録 でブラウザを許可してください。', 'warn');
