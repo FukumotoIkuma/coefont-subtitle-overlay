@@ -89,6 +89,8 @@
         <option value="screen">黒地を抜く(明るい文字用)</option>
       </select></div>
     <div class="row"><label for="subOpacity">不透明度</label><input type="range" id="subOpacity" min="20" max="100"><output id="oOpacity"></output></div>
+    <div class="row"><label for="textSize">文字の大きさ</label><input type="range" id="textSize" min="400" max="1600" step="20"></div>
+    <div class="row"><label for="frameH">表示する行数</label><input type="range" id="frameH" min="150" max="900" step="5"></div>
     <div class="row"><button data-act="resetCrop">範囲を初期化</button><button data-act="resetPos">配置を初期化</button></div>
   </div>
 
@@ -107,23 +109,29 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const STORE_KEY = 'coefont-subtitle-overlay';
+// 切り抜きの持ち方を変えたので、旧形式の保存値を読まないようキーを分ける
+const STORE_KEY = 'coefont-subtitle-overlay:v2';
 const URL_KEY = 'coefont-subtitle-overlay:url';
-const CROP_DEFAULTS = { x: 0, y: 0.62, w: 1, h: 0.38 };
-const POS_DEFAULTS = { subX: 0.1, subY: 0.76, subW: 0.8 };
+// CoeFontの視聴画面は上115〜118pxがロゴと言語切替で、その下が端から端まで字幕欄(下端で自動スクロール)。
+// 字幕は欄の上から溜まっていくので、欄ごと低く描かせて「常に最新の数行だけ」が見えるようにする。
+// 切り抜きは割合ではなく四辺からの余白(px)で持つ。こうすると描く大きさを変えても上の操作部だけが切れ続ける
+const CROP_DEFAULTS = { fw: 800, fh: 300, it: 118, il: 0, ir: 0, ib: 0 };
+const POS_DEFAULTS = { subX: 0.1, subY: 0.66, subW: 0.8 };
 const DEFAULTS = { ...CROP_DEFAULTS, ...POS_DEFAULTS, subOpacity: 1, blend: 'normal' };
 const BLENDS = ['normal', 'multiply', 'screen'];
-const FRAME_W = 1280, FRAME_H = 720;
+const FW_RANGE = [400, 1600];
 const MIN = 0.02;
+const MIN_PX = 40;
 const MODE_HINTS = {
   compose: '赤枠=字幕の位置。ドラッグで移動、角で拡大縮小。出力ウィンドウにすぐ反映される',
-  crop: 'ドラッグで字幕の範囲を囲む(出力ウィンドウ側は CoeFont の画面全体に切り替わる)',
+  crop: '初期値は CoeFont の字幕欄全体。変えるときだけドラッグで囲む(出力ウィンドウ側は CoeFont の画面全体に切り替わる)',
   interact: '出力ウィンドウ側で CoeFont をそのまま操作できる(参加、言語の切り替えなど)',
 };
 // 手元のプレビューと出力ウィンドウは別文書なので、同じ見た目の定義を両方へ差し込む
 const SCENE_CSS = `
   .scene { position: relative; overflow: hidden; background: #000; user-select: none; touch-action: none; }
   .scene .slide { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .scene .shade { position: absolute; inset: 0; background: #000; }
   .scene .sub { position: absolute; overflow: hidden; }
   .scene .content { position: absolute; left: 0; top: 0; border: 0; background: #fff; transform-origin: 0 0; }
   .scene .ph { background: repeating-linear-gradient(45deg, #cfd6e4 0 24px, #e9edf5 24px 48px); opacity: .8; }
@@ -162,10 +170,12 @@ function addStyle(doc, css) {
 }
 
 function normalize() {
-  cfg.x = clamp(cfg.x, 0, 1 - MIN);
-  cfg.y = clamp(cfg.y, 0, 1 - MIN);
-  cfg.w = clamp(cfg.w, MIN, 1 - cfg.x);
-  cfg.h = clamp(cfg.h, MIN, 1 - cfg.y);
+  cfg.fw = clamp(cfg.fw, ...FW_RANGE);
+  cfg.fh = clamp(cfg.fh, 150, 900);
+  cfg.il = clamp(cfg.il, 0, cfg.fw - MIN_PX);
+  cfg.ir = clamp(cfg.ir, 0, cfg.fw - cfg.il - MIN_PX);
+  cfg.it = clamp(cfg.it, 0, cfg.fh - MIN_PX);
+  cfg.ib = clamp(cfg.ib, 0, cfg.fh - cfg.it - MIN_PX);
   cfg.subW = clamp(cfg.subW, 0.1, 1);
   cfg.subX = clamp(cfg.subX, 0, 1 - cfg.subW);
   cfg.subY = clamp(cfg.subY, 0, 0.98);
@@ -182,6 +192,8 @@ function makeScene(doc, root, real) {
   slide.muted = true;
   slide.playsInline = true;
   slide.autoplay = true;
+  const shade = doc.createElement('div');
+  shade.className = 'shade';
   const sub = doc.createElement('div');
   sub.className = 'sub';
   const content = doc.createElement(real ? 'iframe' : 'div');
@@ -190,45 +202,48 @@ function makeScene(doc, root, real) {
     content.allow = 'autoplay; microphone; clipboard-write';
     content.title = 'CoeFont';
   }
-  // 表示の大きさでCoeFont側のレイアウトが変わると切り抜き位置がずれるので、固定サイズで描かせて拡大縮小だけする
-  content.style.width = FRAME_W + 'px';
-  content.style.height = FRAME_H + 'px';
   const crop = doc.createElement('div');
   crop.className = 'crop';
   const sel = doc.createElement('div');
   sel.className = 'sel';
   crop.append(sel);
   sub.append(content, crop);
-  root.prepend(slide, sub);
+  root.prepend(slide, shade, sub);
   bindCropDrag(crop);
   for (const ev of ['loadedmetadata', 'resize', 'emptied']) slide.addEventListener(ev, layout);
-  return { doc, root, slide, sub, content, crop, sel, real };
+  return { doc, root, slide, shade, sub, content, crop, sel, real };
 }
 
 function layoutScene(sc) {
   const W = sc.root.clientWidth, H = sc.root.clientHeight;
   const composing = mode === 'compose';
-  sc.slide.style.visibility = composing ? '' : 'hidden';
+  // スライドの映像自体をvisibilityやopacityで隠すと、戻したあとも黒いまま再描画されない環境がある(Chromium系の組み込みブラウザで再現)。
+  // 映像には触らず、上に黒い幕を掛けて隠す
+  sc.shade.style.display = composing ? 'none' : '';
   sc.sub.style.display = url ? '' : 'none';
+  // 出力先の大きさでCoeFont側のレイアウトが変わると切り抜きがずれるので、決めた大きさで描かせて拡大縮小だけする
+  sc.content.style.width = cfg.fw + 'px';
+  sc.content.style.height = cfg.fh + 'px';
+  const cw = cfg.fw - cfg.il - cfg.ir, ch = cfg.fh - cfg.it - cfg.ib;
 
   let scale, box, shift = [0, 0];
   if (composing) {
     const width = cfg.subW * W;
-    scale = width / (cfg.w * FRAME_W);
-    box = { left: cfg.subX * W, top: cfg.subY * H, width, height: cfg.h * FRAME_H * scale };
-    shift = [-cfg.x * FRAME_W, -cfg.y * FRAME_H];
+    scale = width / cw;
+    box = { left: cfg.subX * W, top: cfg.subY * H, width, height: ch * scale };
+    shift = [-cfg.il, -cfg.it];
   } else {
     // 範囲指定とCoeFontの操作は、切り抜く前の全体を見せて行う
-    scale = Math.min(W / FRAME_W, H / FRAME_H);
-    box = { left: (W - FRAME_W * scale) / 2, top: (H - FRAME_H * scale) / 2, width: FRAME_W * scale, height: FRAME_H * scale };
+    scale = Math.min(W / cfg.fw, H / cfg.fh);
+    box = { left: (W - cfg.fw * scale) / 2, top: (H - cfg.fh * scale) / 2, width: cfg.fw * scale, height: cfg.fh * scale };
   }
   for (const k in box) sc.sub.style[k] = box[k] + 'px';
   sc.content.style.transform = `scale(${scale}) translate(${shift[0]}px, ${shift[1]}px)`;
   sc.crop.style.display = mode === 'crop' ? '' : 'none';
-  sc.sel.style.left = cfg.x * 100 + '%';
-  sc.sel.style.top = cfg.y * 100 + '%';
-  sc.sel.style.width = cfg.w * 100 + '%';
-  sc.sel.style.height = cfg.h * 100 + '%';
+  sc.sel.style.left = cfg.il / cfg.fw * 100 + '%';
+  sc.sel.style.top = cfg.it / cfg.fh * 100 + '%';
+  sc.sel.style.width = cw / cfg.fw * 100 + '%';
+  sc.sel.style.height = ch / cfg.fh * 100 + '%';
   if (sc.real) {
     sc.content.style.pointerEvents = mode === 'interact' ? 'auto' : 'none';
     sc.sub.style.mixBlendMode = composing ? cfg.blend : 'normal';
@@ -260,6 +275,9 @@ function render() {
   $('blend').value = cfg.blend;
   $('subOpacity').value = cfg.subOpacity * 100;
   $('oOpacity').textContent = Math.round(cfg.subOpacity * 100) + '%';
+  // 狭く描かせるほど、同じ字幕枠に対して文字が大きく映る
+  $('textSize').value = FW_RANGE[0] + FW_RANGE[1] - cfg.fw;
+  $('frameH').value = cfg.fh;
   for (const b of $('modes').children) b.classList.toggle('on', b.dataset.mode === mode);
   $('modeHint').textContent = MODE_HINTS[mode];
   $('dotSub').classList.toggle('on', !!url);
@@ -405,10 +423,10 @@ function bindCropDrag(layer) {
     const p = fracAt(e);
     // クリックだけで極小の範囲になるのを避ける
     if (Math.abs(p.x - start.x) < MIN || Math.abs(p.y - start.y) < MIN) return;
-    cfg.x = Math.min(p.x, start.x);
-    cfg.y = Math.min(p.y, start.y);
-    cfg.w = Math.abs(p.x - start.x);
-    cfg.h = Math.abs(p.y - start.y);
+    cfg.il = Math.min(p.x, start.x) * cfg.fw;
+    cfg.ir = (1 - Math.max(p.x, start.x)) * cfg.fw;
+    cfg.it = Math.min(p.y, start.y) * cfg.fh;
+    cfg.ib = (1 - Math.max(p.y, start.y)) * cfg.fh;
     render();
   });
   for (const ev of ['pointerup', 'pointercancel']) layer.addEventListener(ev, () => { start = null; });
@@ -459,6 +477,8 @@ document.addEventListener('click', (e) => {
 });
 $('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadUrl(); });
 $('blend').addEventListener('change', (e) => { cfg.blend = e.target.value; render(); });
+$('textSize').addEventListener('input', (e) => { cfg.fw = FW_RANGE[0] + FW_RANGE[1] - e.target.value; render(); });
+$('frameH').addEventListener('input', (e) => { cfg.fh = +e.target.value; render(); });
 $('subOpacity').addEventListener('input', (e) => { cfg.subOpacity = e.target.value / 100; render(); });
 // このタブを閉じると出力ウィンドウを操作できなくなるので道連れにする
 window.addEventListener('pagehide', () => { if (out) out.win.close(); });
