@@ -8,6 +8,7 @@
   :root { color-scheme: dark; }
   body { margin: 0; padding: 16px; font: 14px/1.5 system-ui, sans-serif; background: #16181c; color: #e6e6e6; }
   h1 { font-size: 16px; margin: 0 0 12px; }
+  h2 { font-size: 14px; margin: 24px 0 8px; }
   .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
   button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid #444; background: #2a2d33; color: inherit; cursor: pointer; }
   button.primary { background: #2f6feb; border-color: #2f6feb; color: #fff; }
@@ -53,10 +54,28 @@
   <label for="sw">幅</label><input type="range" id="sw" min="2" max="100" step="0.5"><output id="ow"></output>
 </div>
 
+<h2>合成表示(スライドに字幕を重ねて聴衆側に全画面で出す)</h2>
+<div class="bar">
+  <button id="pickSlide">③ スライドショーのウィンドウを選択</button>
+  <button id="openStage" disabled>④ 合成画面を開く</button>
+  <label>字幕の透過 <select id="blend">
+    <option value="normal">なし</option>
+    <option value="multiply">白地を抜く(暗い文字用)</option>
+    <option value="screen">黒地を抜く(明るい文字用)</option>
+  </select></label>
+</div>
+<div class="hint">先に PowerPoint 等のスライドショーを開始してから③でそのウィンドウを選ぶ。④で開いた窓を聴衆側ディスプレイへ移動し、クリックで全画面にする。</div>
+<div class="sliders">
+  <label for="subW">字幕の幅</label><input type="range" id="subW" min="10" max="100" step="1"><output id="osubW"></output>
+  <label for="subBottom">下からの位置</label><input type="range" id="subBottom" min="0" max="90" step="0.5"><output id="osubBottom"></output>
+  <label for="subOpacity">不透明度</label><input type="range" id="subOpacity" min="20" max="100" step="1"><output id="osubOpacity"></output>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const STORE_KEY = 'coefont-subtitle-overlay';
-const DEFAULTS = { x: 0, y: 0.62, w: 1, h: 0.38, bg: '#000000', frameless: true };
+const DEFAULTS = { x: 0, y: 0.62, w: 1, h: 0.38, bg: '#000000', frameless: true, subW: 0.8, subBottom: 0.03, subOpacity: 1, blend: 'normal' };
+const STAGE_KEYS = ['subW', 'subBottom', 'subOpacity'];
 const MIN = 0.02;
 
 let cfg = { ...DEFAULTS };
@@ -65,6 +84,8 @@ try { Object.assign(cfg, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); }
 let stream = null;
 let out = null; // { win, box, video }
 let cropped = null; // 枠なしモード用に切り抜いた映像トラック
+let slideStream = null;
+let comp = null; // 合成画面 { win, slide, box, video }
 
 const preview = $('preview');
 const stage = $('stage');
@@ -134,6 +155,36 @@ function layoutOut() {
   win.document.body.style.background = cfg.bg;
 }
 
+// 字幕の縦横比は切り抜き範囲で決まるので、幅と下端だけ指定させて高さは従属させる
+function layoutComp() {
+  if (!comp) return;
+  const { win, box, video } = comp;
+  box.style.mixBlendMode = cfg.blend;
+  box.style.opacity = cfg.subOpacity;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  box.style.display = vw && vh ? '' : 'none';
+  if (!vw || !vh) return;
+  const W = win.innerWidth, cw = cfg.w * vw, ch = cfg.h * vh;
+  const s = W * cfg.subW / cw;
+  box.style.width = cw * s + 'px';
+  box.style.height = ch * s + 'px';
+  box.style.left = (W - cw * s) / 2 + 'px';
+  box.style.bottom = win.innerHeight * cfg.subBottom + 'px';
+  video.style.width = vw * s + 'px';
+  video.style.height = vh * s + 'px';
+  video.style.left = -cfg.x * vw * s + 'px';
+  video.style.top = -cfg.y * vh * s + 'px';
+}
+
+function makeVideo(doc, css) {
+  const video = doc.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.autoplay = true;
+  video.style.cssText = css;
+  return video;
+}
+
 function render() {
   clampCrop();
   const pct = (v) => (v * 100).toFixed(1);
@@ -148,13 +199,21 @@ function render() {
   }
   $('bg').value = cfg.bg;
   $('frameless').checked = cfg.frameless && hasFrameless;
+  for (const k of STAGE_KEYS) {
+    $(k).value = cfg[k] * 100;
+    $('o' + k).textContent = Math.round(cfg[k] * 100) + '%';
+  }
+  $('blend').value = cfg.blend;
   layoutOut();
+  layoutComp();
   save();
 }
 
 function updateButtons() {
   $('show').disabled = !stream;
   $('stop').disabled = !stream;
+  $('openStage').disabled = !slideStream;
+  $('openStage').textContent = comp ? '④ 合成画面を開き直す' : '④ 合成画面を開く';
   $('show').textContent = isShown() ? '② 字幕ウィンドウを開き直す' : '② 字幕を表示';
   stage.classList.toggle('live', !!stream);
 }
@@ -169,6 +228,7 @@ function dropStream(message, kind) {
   stream = null;
   attach(preview, null);
   if (out) attach(out.video, null);
+  if (comp) { attach(comp.video, null); layoutComp(); }
   if (cropped) { cropped.stop(); cropped = null; }
   updateButtons();
   setStatus(message, kind);
@@ -197,6 +257,7 @@ async function pick() {
     dropStream('画面共有が終了しました。「字幕画面を選択」で再接続できます(字幕ウィンドウは開いたままで構いません)。', 'warn');
   attach(preview, s);
   if (out) attach(out.video, s);
+  if (comp) attach(comp.video, s);
   if (hasFrameless) startCropped(s.getVideoTracks()[0]);
   updateButtons();
   const surface = s.getVideoTracks()[0].getSettings().displaySurface;
@@ -244,11 +305,7 @@ async function show() {
   doc.body.style.cssText = 'margin:0;height:100vh;overflow:hidden;display:flex;align-items:center;justify-content:center;';
   const box = doc.createElement('div');
   box.style.cssText = 'position:relative;overflow:hidden;flex:none;';
-  const video = doc.createElement('video');
-  video.muted = true;
-  video.playsInline = true;
-  video.autoplay = true;
-  video.style.cssText = 'position:absolute;max-width:none;';
+  const video = makeVideo(doc, 'position:absolute;max-width:none;');
   box.append(video);
   doc.body.append(box);
 
@@ -262,6 +319,79 @@ async function show() {
   });
   attach(video, stream);
   layoutOut();
+  updateButtons();
+}
+
+async function pickSlide() {
+  let s;
+  try {
+    s = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 30 } },
+      audio: false,
+      selfBrowserSurface: 'exclude',
+    });
+  } catch (e) {
+    if (e.name !== 'NotAllowedError') setStatus(`スライドの画面を取得できませんでした: ${e.name}: ${e.message}`, 'error');
+    return;
+  }
+  if (slideStream) slideStream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+  slideStream = s;
+  const track = s.getVideoTracks()[0];
+  track.onended = () => {
+    slideStream = null;
+    if (comp) attach(comp.slide, null);
+    updateButtons();
+    setStatus('スライドの画面共有が終了しました。③で選び直せます(合成画面は開いたままで構いません)。', 'warn');
+  };
+  if (comp) attach(comp.slide, s);
+  updateButtons();
+  // 画面全体を選ぶと合成画面自身が映り込んで合わせ鏡になる
+  setStatus(track.getSettings().displaySurface === 'monitor'
+    ? '画面全体が選ばれています。合成画面と同じディスプレイだと映像が合わせ鏡になるので、スライドショーの「ウィンドウ」を選び直してください。'
+    : 'スライドを取得中。④で合成画面を開いてください。',
+    track.getSettings().displaySurface === 'monitor' ? 'warn' : '');
+}
+
+function openStage() {
+  if (comp) comp.win.close();
+  const win = window.open('', 'coefont-stage', 'popup,width=960,height=540');
+  if (!win) {
+    setStatus('ポップアップがブロックされました。このサイトのポップアップを許可してください。', 'error');
+    return;
+  }
+  const doc = win.document;
+  doc.title = '合成画面';
+  doc.body.innerHTML = '';
+  doc.body.style.cssText = 'margin:0;height:100vh;overflow:hidden;background:#000;position:relative;';
+  const slide = makeVideo(doc, 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;');
+  const box = doc.createElement('div');
+  box.style.cssText = 'position:absolute;overflow:hidden;';
+  const video = makeVideo(doc, 'position:absolute;max-width:none;');
+  box.append(video);
+  const hint = doc.createElement('div');
+  hint.textContent = 'この窓を聴衆側ディスプレイへ移動し、クリックで全画面にする(Escで解除)';
+  hint.style.cssText = 'position:absolute;top:0;left:0;right:0;padding:8px;font:14px system-ui,sans-serif;color:#fff;background:rgba(0,0,0,.7);text-align:center;';
+  doc.body.append(slide, box, hint);
+
+  const self = { win, slide, box, video };
+  comp = self;
+  doc.body.addEventListener('click', () => {
+    if (!doc.fullscreenElement) doc.documentElement.requestFullscreen().catch(() => {});
+  });
+  doc.addEventListener('fullscreenchange', () => {
+    hint.style.display = doc.fullscreenElement ? 'none' : '';
+    // 全画面中はカーソルが聴衆に見えないようにする
+    doc.body.style.cursor = doc.fullscreenElement ? 'none' : '';
+  });
+  win.addEventListener('resize', layoutComp);
+  video.addEventListener('loadedmetadata', layoutComp);
+  video.addEventListener('resize', layoutComp);
+  win.addEventListener('pagehide', () => {
+    if (comp === self) { comp = null; updateButtons(); }
+  });
+  attach(slide, slideStream);
+  attach(video, stream);
+  layoutComp();
   updateButtons();
 }
 
@@ -297,24 +427,30 @@ stage.addEventListener('pointercancel', endDrag);
 for (const k of ['x', 'y', 'w', 'h']) {
   $('s' + k).addEventListener('input', (e) => { cfg[k] = e.target.value / 100; render(); });
 }
+for (const k of STAGE_KEYS) {
+  $(k).addEventListener('input', (e) => { cfg[k] = e.target.value / 100; render(); });
+}
+$('blend').addEventListener('change', (e) => { cfg.blend = e.target.value; render(); });
+$('pickSlide').addEventListener('click', pickSlide);
+$('openStage').addEventListener('click', openStage);
 $('bg').addEventListener('input', (e) => { cfg.bg = e.target.value; render(); });
 $('frameless').addEventListener('change', (e) => { cfg.frameless = e.target.checked; render(); });
 pipVideo.addEventListener('enterpictureinpicture', updateButtons);
 pipVideo.addEventListener('leavepictureinpicture', updateButtons);
-$('reset').addEventListener('click', () => { cfg = { ...DEFAULTS, bg: cfg.bg, frameless: cfg.frameless }; render(); });
+$('reset').addEventListener('click', () => { cfg = { ...cfg, x: DEFAULTS.x, y: DEFAULTS.y, w: DEFAULTS.w, h: DEFAULTS.h }; render(); });
 $('pick').addEventListener('click', pick);
 $('show').addEventListener('click', show);
 $('stop').addEventListener('click', () => dropStream('共有を停止しました。'));
 // このタブを閉じると字幕ウィンドウの映像も止まるので道連れにする
-window.addEventListener('pagehide', () => { if (out) out.win.close(); });
+window.addEventListener('pagehide', () => { if (out) out.win.close(); if (comp) comp.win.close(); });
 
 // --- 環境判定 ---
 if (!window.isSecureContext) {
   setStatus('このページは HTTPS(または localhost)で開く必要があります。', 'error');
-  $('pick').disabled = true;
+  $('pick').disabled = $('pickSlide').disabled = true;
 } else if (!navigator.mediaDevices?.getDisplayMedia) {
   setStatus('このブラウザは画面共有(getDisplayMedia)に対応していません。デスクトップ版の Chrome / Edge を使ってください。', 'error');
-  $('pick').disabled = true;
+  $('pick').disabled = $('pickSlide').disabled = true;
 } else if (!hasDocPiP) {
   setStatus('このブラウザは Document Picture-in-Picture 非対応です。通常のポップアップウィンドウで表示します(常に最前面にはなりません)。Chrome / Edge 推奨。', 'warn');
 }
