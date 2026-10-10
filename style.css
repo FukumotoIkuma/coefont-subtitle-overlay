@@ -1,0 +1,58 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 12px; font: 13px/1.5 system-ui, sans-serif; background: #16181c; color: #e6e6e6; }
+h2 { font-size: 12px; font-weight: 600; margin: 0 0 2px; color: #bbb; }
+a { color: #7aa7ff; }
+button, input, select { font: inherit; }
+button { padding: 6px 12px; border-radius: 5px; border: 1px solid #444; background: #2a2d33; color: inherit; cursor: pointer; }
+button:hover:not(:disabled) { background: #343840; }
+button.primary { background: #2f6feb; border-color: #2f6feb; color: #fff; }
+button.primary:hover:not(:disabled) { background: #4380f0; }
+button.big { padding: 10px 14px; width: 100%; }
+button:disabled { opacity: .4; cursor: not-allowed; }
+input[type=url] { flex: 1; min-width: 0; padding: 6px 8px; border-radius: 5px; border: 1px solid #444; background: #101215; color: inherit; }
+select { padding: 4px; }
+#status { padding: 6px 10px; border-radius: 5px; background: #22252b; margin-bottom: 10px; white-space: pre-line; }
+#status.error { background: #4a1f1f; }
+#status.warn { background: #4a3d1f; }
+.hint { color: #999; font-size: 12px; }
+
+.docks { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 12px; }
+@media (max-width: 900px) { .docks { grid-template-columns: 1fr; } }
+.dock { background: #1e2126; border: 1px solid #2c3037; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.row { display: flex; align-items: center; gap: 8px; }
+.row .name { flex: 1; }
+.row input[type=range] { flex: 1; min-width: 0; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #555; flex: none; }
+.dot.on { background: #3fb950; }
+
+#stage { border-radius: 6px; }
+#gizmo { position: absolute; border: 2px solid #e5484d; cursor: move; display: none; }
+#gizmo span { position: absolute; left: 6px; top: 4px; font-size: 11px; color: #222; background: rgba(255, 255, 255, .8); padding: 0 4px; border-radius: 3px; pointer-events: none; white-space: nowrap; }
+#gizmo i { position: absolute; width: 12px; height: 12px; background: #e5484d; }
+#gizmo b { position: absolute; background: #2f6feb; border: 1px solid #fff; border-radius: 3px; }
+#gizmo b[data-c=t], #gizmo b[data-c=b] { left: calc(50% - 22px); width: 44px; height: 8px; cursor: ns-resize; }
+#gizmo b[data-c=l], #gizmo b[data-c=r] { top: calc(50% - 16px); width: 8px; height: 32px; cursor: ew-resize; }
+#gizmo b[data-c=t] { top: -5px; } #gizmo b[data-c=b] { bottom: -5px; }
+#gizmo b[data-c=l] { left: -5px; } #gizmo b[data-c=r] { right: -5px; }
+#gizmo i[data-h=nw] { left: -7px; top: -7px; cursor: nwse-resize; }
+#gizmo i[data-h=se] { right: -7px; bottom: -7px; cursor: nwse-resize; }
+#gizmo i[data-h=ne] { right: -7px; top: -7px; cursor: nesw-resize; }
+#gizmo i[data-h=sw] { left: -7px; bottom: -7px; cursor: nesw-resize; }
+/* 並べる配置(下・左右)では字幕は領域に収まる大きさで中央に置かれるので、移動と拡大縮小のつまみは出さない */
+#gizmo.split { cursor: default; }
+#gizmo.split i { display: none; }
+/* 字幕が領域いっぱいのとき、辺のつまみが境界線と重なって掴めなくなるので内側へずらす */
+#gizmo.split b[data-c=t] { top: 10px; } #gizmo.split b[data-c=b] { bottom: 10px; }
+#gizmo.split b[data-c=l] { left: 10px; } #gizmo.split b[data-c=r] { right: 10px; }
+/* スライドと字幕の境界。細い線だと掴みにくいので、見た目より広い当たり判定を持たせる */
+#divider { position: absolute; background: #e5484d; }
+#divider::before { content: ''; position: absolute; }
+#divider.h { left: 0; right: 0; height: 4px; margin-top: -2px; cursor: ns-resize; }
+#divider.h::before { left: 0; right: 0; top: -7px; bottom: -7px; }
+#divider.v { top: 0; bottom: 0; width: 4px; margin-left: -2px; cursor: ew-resize; }
+#divider.v::before { top: 0; bottom: 0; left: -7px; right: -7px; }
+[hidden] { display: none !important; }
+#note { position: absolute; left: 0; right: 0; top: 0; padding: 10px; text-align: center; color: #999; pointer-events: none; }
+
+#foot { margin-top: 10px; display: flex; justify-content: space-between; gap: 12px; }
