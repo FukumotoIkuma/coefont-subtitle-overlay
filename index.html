@@ -69,7 +69,7 @@
     <div class="row"><span class="dot" id="dotSlide"></span><span class="name">スライドショーのウィンドウ</span>
       <button data-act="pickSlide" id="btnSlide">選択</button><button data-act="stopSlide" id="stopSlide">停止</button></div>
     <button data-act="toggleFull" id="btnFull"></button>
-    <div class="hint">CoeFont の文字サイズ(A− A+)や Single / All を変えたいときだけ使う。</div>
+    <div class="hint">切り抜いたあとで CoeFont の設定(A− A+、Single / All など)を変えたいときに使う。</div>
   </div>
 
   <div class="dock">
@@ -102,14 +102,14 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-// 切り抜きの持ち方を変えたので、旧形式の保存値を読まないようキーを分ける
-const STORE_KEY = 'coefont-subtitle-overlay:v2';
+// 初期値を「切り抜きなし」に変えたので、以前の版が保存した切り抜きを引き継がないようキーを分ける
+const STORE_KEY = 'coefont-subtitle-overlay:v3';
 const URL_KEY = 'coefont-subtitle-overlay:url';
-// CoeFontの視聴画面は上115〜118pxがロゴと言語切替で、その下が端から端まで字幕欄(下端で自動スクロール)。
-// 字幕は欄の上から溜まっていくので、欄ごと低く描かせて「常に最新の数行だけ」が見えるようにする。
-// 切り抜きは割合ではなく四辺からの余白(px)で持つ。こうすると描く大きさを変えても上の操作部だけが切れ続ける
-const CROP_DEFAULTS = { fw: 800, fh: 300, it: 118, il: 0, ir: 0, ib: 0 };
-const POS_DEFAULTS = { subX: 0.1, subY: 0.66, subW: 0.8 };
+// 初期状態では切り抜かない。どこを見せるかは利用者が決めるもので、最初から操作部を切り落とすと
+// CoeFont側の設定(文字サイズ、Single/All、言語)に触れなくなる。
+// 切り抜きは割合ではなく四辺からの余白(px)で持つ。こうすると描く大きさを変えても切った位置がずれない
+const CROP_DEFAULTS = { fw: 960, fh: 540, it: 0, il: 0, ir: 0, ib: 0 };
+const POS_DEFAULTS = { subX: 0.25, subY: 0.4, subW: 0.5 };
 const DEFAULTS = { ...CROP_DEFAULTS, ...POS_DEFAULTS, subOpacity: 1, blend: 'normal' };
 const BLENDS = ['normal', 'multiply', 'screen'];
 const FW_RANGE = [400, 1600];
@@ -361,7 +361,7 @@ function loadUrl() {
   if (!o) return;
   o.scene.content.src = url;
   render();
-  setStatus('別のウィンドウ(またはタブ)に出力を開きました。そこに出ている字幕の枠の中で CoeFont の開始ボタンを押してください。\n別のタブでも同じ招待URLを開いていると音声が二重に鳴るので、そちらは閉じてください。');
+  setStatus('別のウィンドウ(またはタブ)に出力を開きました。そこに CoeFont の画面がそのまま出ているので、開始や設定を済ませてください。そのあと、プレビューの枠の青い辺で字幕以外を切り落とします。\n別のタブでも同じ招待URLを開いていると音声が二重に鳴るので、そちらは閉じてください。');
 }
 
 function setSlide(s) {
@@ -488,7 +488,7 @@ if (!navigator.mediaDevices?.getDisplayMedia) {
     : 'このページは HTTPS(または localhost)で開く必要があります。', 'error');
   $('btnSlide').disabled = true;
 } else {
-  setStatus('① CoeFont の招待URLを読み込む(出力が別ウィンドウかタブで開く) → ② 出力側の字幕の枠内で CoeFont を開始 → ③ スライドショーのウィンドウを選択 → ④ 出力を聴衆側ディスプレイで全画面にする');
+  setStatus('① CoeFont の招待URLを読み込む(出力が別ウィンドウかタブで開く) → ② 出力側で CoeFont を開始・設定 → ③ 青い辺で字幕以外を切り落とす → ④ スライドショーのウィンドウを選択 → ⑤ 出力を聴衆側ディスプレイで全画面にする');
 }
 
 // 再読み込みで貼り直さずに済むよう、タブを閉じるまでだけURLを覚えておく(招待URLを長く残さない)
