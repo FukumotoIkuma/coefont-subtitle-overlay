@@ -40,7 +40,7 @@
   .dot { width: 9px; height: 9px; border-radius: 50%; background: #555; flex: none; }
   .dot.on { background: #3fb950; }
 
-  #stage { border-radius: 6px; aspect-ratio: 16 / 9; max-width: 1100px; }
+  #stage { border-radius: 6px; }
   #gizmo { position: absolute; border: 2px solid #e5484d; cursor: move; display: none; }
   #gizmo i { position: absolute; width: 12px; height: 12px; background: #e5484d; }
   #gizmo i[data-h=nw] { left: -7px; top: -7px; cursor: nwse-resize; }
@@ -220,7 +220,8 @@ function layoutScene(sc) {
   // スライドの映像自体をvisibilityやopacityで隠すと、戻したあとも黒いまま再描画されない環境がある(Chromium系の組み込みブラウザで再現)。
   // 映像には触らず、上に黒い幕を掛けて隠す
   sc.shade.style.display = composing ? 'none' : '';
-  sc.sub.style.display = url ? '' : 'none';
+  // 手元の板は位置と範囲を示すためのもの。CoeFontを操作する間は示すものがないので出さない
+  sc.sub.style.display = url && (sc.real || mode !== 'interact') ? '' : 'none';
   // 出力先の大きさでCoeFont側のレイアウトが変わると切り抜きがずれるので、決めた大きさで描かせて拡大縮小だけする
   sc.content.style.width = cfg.fw + 'px';
   sc.content.style.height = cfg.fh + 'px';
@@ -246,7 +247,8 @@ function layoutScene(sc) {
   sc.sel.style.height = ch / cfg.fh * 100 + '%';
   if (sc.real) {
     sc.content.style.pointerEvents = mode === 'interact' ? 'auto' : 'none';
-    sc.sub.style.mixBlendMode = composing ? cfg.blend : 'normal';
+    // 下地のスライドがないまま白地や黒地を抜くと、黒い背景に溶けて字幕ごと見えなくなる
+    sc.sub.style.mixBlendMode = composing && slideStream ? cfg.blend : 'normal';
     sc.sub.style.opacity = composing ? cfg.subOpacity : 1;
     // 全画面で字幕を出している間はカーソルを聴衆に見せない
     sc.root.style.cursor = sc.doc.fullscreenElement && composing ? 'none' : '';
@@ -259,14 +261,18 @@ addStyle(document, SCENE_CSS);
 
 function layout() {
   // スライドショーは聴衆側ディスプレイを全面で覆うので、縦横比をスライドに合わせれば出力と配置が一致する
-  stage.style.aspectRatio = ctl.slide.videoWidth ? `${ctl.slide.videoWidth} / ${ctl.slide.videoHeight}` : '';
+  const ratio = ctl.slide.videoWidth ? ctl.slide.videoWidth / ctl.slide.videoHeight : 16 / 9;
+  stage.style.aspectRatio = ratio;
+  // 下の操作パネルが画面外へ押し出されない高さに収める
+  stage.style.maxWidth = `min(1100px, ${55 * ratio}vh)`;
   const box = layoutScene(ctl);
   gizmo.style.display = mode === 'compose' && url ? 'block' : 'none';
   for (const k in box) gizmo.style[k] = box[k] + 'px';
   if (out) layoutScene(out.scene);
   $('note').textContent = !url ? '「ソース」に CoeFont の招待URLを貼って読み込む'
-    : mode === 'interact' ? '出力ウィンドウ側で CoeFont を操作してください'
-    : mode === 'compose' && !slideStream ? 'スライド未選択(聴衆には黒い背景に字幕だけが見える)' : '';
+    : mode === 'interact' ? 'CoeFont は出力ウィンドウに表示されています。そちらの窓で操作してください(見当たらなければ「出力ウィンドウを前面に出す」)'
+    : mode === 'compose' && !slideStream ? 'スライド未選択(聴衆には黒い背景に字幕だけが見える。透過はスライドを選ぶと効く)'
+    : mode === 'compose' ? '' : '縞模様は CoeFont の画面の代用表示。実物は出力ウィンドウに出ています';
 }
 new ResizeObserver(layout).observe(stage);
 
