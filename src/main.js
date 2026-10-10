@@ -1,7 +1,6 @@
-// 操作画面: 設定の保持と保存、ソース(CoeFont・スライド)、出力ウィンドウ、プレビュー上の操作
 import {
   LAYOUTS, CROP_DEFAULTS, WINDOW_DEFAULTS, POS_DEFAULTS, WIN_W_RANGE, WIN_H_RANGE,
-  load, normalize, splitOf, fitGoal, dragCrop, dragMove, dragResize, dragDivider,
+  load, normalize, splitOf, fitGoal, grabAt, dragCrop, dragMove, dragResize, dragDivider,
 } from './model.js';
 import { SCENE_CSS, makeScene, layoutScene } from './scene.js';
 
@@ -72,7 +71,16 @@ function layout() {
   if (out) layoutScene(out.scene, cfg, view);
 
   gizmo.style.display = url ? 'block' : 'none';
-  for (const k in box) gizmo.style[k] = box[k] + 'px';
+  // 掴むための枠は、字幕の枠そのものではなく、画面の中に見えている部分に合わせる。
+  // 重ねる配置では枠が画面からはみ出すことがあり、そのまま重ねるとはみ出した側のつまみが掴めなくなる
+  const W = stage.clientWidth, H = stage.clientHeight;
+  const left = Math.max(box.left, 0), top = Math.max(box.top, 0);
+  const right = Math.min(box.left + box.width, W), bottom = Math.min(box.top + box.height, H);
+  Object.assign(gizmo.style, { left: left + 'px', top: top + 'px', width: right - left + 'px', height: bottom - top + 'px' });
+  // つまみは枠の辺をまたいで置いてあるので、辺が画面の端にあると外側の半分が切れて掴みにくい。端にある辺のつまみは内側へ寄せる
+  for (const [side, atEdge] of [['l', left < 1], ['t', top < 1], ['r', right > W - 1], ['b', bottom > H - 1]]) {
+    gizmo.classList.toggle('at-' + side, atEdge);
+  }
   const sp = splitOf(cfg);
   gizmo.classList.toggle('split', !!sp);
   divider.hidden = !sp;
@@ -294,12 +302,9 @@ function toggleFull() {
 gizmo.addEventListener('pointerdown', (e) => {
   // 並べる配置で掴めるのは切り抜きの辺だけ。枠の中を押しても動かせないので、調整中の扱い(出力側の枠線)にもしない
   if (isSplit() && !e.target.dataset.c) return;
-  grab = {
+  grab = grabAt(cfg, stage.clientWidth, stage.clientHeight, {
     handle: e.target.dataset.h || '', edge: e.target.dataset.c || '', px: e.clientX, py: e.clientY,
-    start: { ...cfg },
-    W: stage.clientWidth, H: stage.clientHeight,
-    l: gizmo.offsetLeft, t: gizmo.offsetTop, w: gizmo.offsetWidth, h: gizmo.offsetHeight,
-  };
+  });
   gizmo.setPointerCapture(e.pointerId);
   e.preventDefault();
   markAdjusting(true);
@@ -387,14 +392,14 @@ try { $('url').value = sessionStorage.getItem(URL_KEY) || ''; } catch {}
 
 // 配信側が10分キャッシュするので、古い版を見ていないか利用者が確かめられるようにする。
 // ページの日時だけを出さない。ページとスクリプトは別々にキャッシュされるので、ページだけ新しくてコードが古いことがある。
-// いま読み込まれているもの(force-cache)の日時を調べ、食い違っていればそれを伝える
+// 日時が食い違っていても「古い版」とは決めつけない。ファイルごとに更新日時を返す配信元(手元のサーバーなど)では、
+// 正常でも食い違う。いま読み込まれているもの(force-cache)の日時の幅をそのまま出すにとどめる
 const PARTS = [document.lastModified, ...['./main.js', './model.js', './scene.js'].map((f) => fetch(new URL(f, import.meta.url), { cache: 'force-cache' })
   .then((r) => r.headers.get('last-modified')))];
 Promise.allSettled(PARTS).then((results) => {
   const times = results.map((r) => Date.parse(r.value)).filter(Number.isFinite);
-  const oldest = Math.min(...times), newest = Math.max(...times);
-  $('build').textContent = '配信日時: ' + new Date(oldest).toLocaleString()
-    + (newest - oldest > 60_000 ? '(一部が古い版のままです。強制再読み込みしてください)' : '');
+  const [oldest, newest] = [Math.min(...times), Math.max(...times)].map((t) => new Date(t).toLocaleString());
+  $('build').textContent = '配信日時: ' + (!times.length ? '不明' : oldest === newest ? oldest : `${oldest} 〜 ${newest}`);
 });
 
 render();

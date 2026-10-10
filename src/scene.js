@@ -1,4 +1,3 @@
-// スライド+字幕の合成画面を DOM に描く。手元のプレビューと出力ウィンドウの両方がこれを使う
 import { place, cropSize } from './model.js';
 
 // 手元のプレビューと出力ウィンドウは別文書なので、同じ見た目の定義を両方へ差し込む
@@ -50,8 +49,6 @@ export function makeScene(doc, root, real, onSlideSizeChange) {
   return { doc, root, slide, shade, sub, content, crop, sel, outline, real, W: 0, H: 0 };
 }
 
-// view: { url: 字幕を読み込んだか, wholePage: 出力側をCoeFontの画面全体の表示にしているか, adjusting: 調整中か,
-//         hasSlide: スライドを取り込んでいるか, anchor: 切り抜きの辺を掴んでいる間の、掴んだ時点の設定 }
 export function layoutScene(sc, cfg, view) {
   const W = sc.W = sc.root.clientWidth, H = sc.H = sc.root.clientHeight;
   // 手元のプレビューまで全体表示にはしない。聴衆に見える構図を、手元では常に確かめられるようにしておく

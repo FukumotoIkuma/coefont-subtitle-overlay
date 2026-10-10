@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULTS, WIN_H_RANGE, MIN_PX, MIN_OVERLAY_WIDTH_RATIO,
-  load, normalize, regions, place, fitGoal, cropSize, dragCrop, dragMove, dragResize, dragDivider,
+  load, normalize, regions, place, fitGoal, cropSize, grabAt, dragCrop, dragMove, dragResize, dragDivider,
 } from '../src/model.js';
 
 const W = 1600, H = 900;
@@ -12,11 +12,7 @@ const overlayAt = (left, top, width) => ({ ovX: left / W, ovY: top / H, ovScale:
 const placement = (cfg) => [cfg.ovX, cfg.ovY, cfg.ovScale];
 const near = (actual, expected, message) => assert.ok(Math.abs(actual - expected) < 1e-6, `${message ?? ''} ${actual} ≠ ${expected}`);
 
-// 掴んだ時点の状態。枠の位置と大きさは、その時点の配置から求める
-function grabOf(cfg, extra) {
-  const { box } = place(cfg, W, H);
-  return { start: { ...cfg }, W, H, l: box.left, t: box.top, w: box.width, h: box.height, ...extra };
-}
+const grabOf = (cfg, target) => grabAt(cfg, W, H, target);
 
 test('保存値がなければ初期値で始まる', () => {
   assert.deepEqual(load(null), DEFAULTS);
@@ -29,10 +25,15 @@ test('保存値のうち、知っている項目だけを引き継ぐ', () => {
   assert.deepEqual(Object.keys(cfg).sort(), Object.keys(DEFAULTS).sort());
 });
 
-test('画面の外へ飛んだ置き方の保存値は、初期の置き方に戻る', () => {
-  const cfg = load({ ovX: 40, ovY: 0.2, ovScale: 0.001 });
-  assert.deepEqual(placement(cfg), placement(DEFAULTS));
-});
+for (const [what, stored] of [
+  ['画面の外へ飛んだ位置', { ovX: 40, ovY: 0.2, ovScale: 0.001 }],
+  ['画面に収まらないほど大きい拡大率', { ovX: 0.2, ovY: 0.2, ovScale: 5 }],
+  ['見えないほど小さい拡大率', { ovX: 0.2, ovY: 0.2, ovScale: 1e-9 }],
+]) {
+  test(`保存値の置き方が「${what}」なら、初期の置き方に戻る`, () => {
+    assert.deepEqual(placement(load(stored)), placement(DEFAULTS));
+  });
+}
 
 test('壊れた保存値は、その項目だけ初期値に戻る', () => {
   const cfg = load({ fw: 'wide', band: null, subOpacity: NaN, layout: 'toString', blend: 7, fh: 300 });
@@ -183,6 +184,13 @@ test('字幕の枠を動かすと、マウスと同じだけ位置が変わり�
   near(after.scale, before.scale, '拡大率');
 });
 
+test('字幕の枠を何度動かしても、文字の大きさ(拡大率)は変わらない', () => {
+  const cfg = config({ ...overlayAt(400.4, 270.3, 801.7), il: 33.3 });
+  const scale = cfg.ovScale;
+  for (const [dx, dy] of [[13, 7], [-29, 11], [5, -17], [-3, 2]]) dragMove(cfg, grabOf(cfg), dx, dy);
+  assert.equal(cfg.ovScale, scale);
+});
+
 test('字幕の枠は、動かしても画面の左右の外へは出ない', () => {
   const cfg = config(overlayAt(400, 270, 800));
   dragMove(cfg, grabOf(cfg), 5000, 0);
@@ -209,6 +217,52 @@ test('角を動かすと、対角を固定したまま縦横比を保って大�
   near(after.width / after.height, before.width / before.height, '縦横比');
   near(after.left + after.width, before.left + before.width, '右辺');
   near(after.top + after.height, before.top + before.height, '下辺');
+});
+
+test('角を大きく動かしても、枠は画面の左・右・上の外へは広がらない', () => {
+  const cfg = config(overlayAt(400, 270, 800));
+  dragResize(cfg, grabOf(cfg, { handle: 'sw' }), -5000);
+  near(place(cfg, W, H).box.left, 0, '左辺');
+
+  const toRight = config(overlayAt(400, 270, 800));
+  dragResize(toRight, grabOf(toRight, { handle: 'se' }), 5000);
+  const right = place(toRight, W, H).box;
+  near(right.left + right.width, W, '右辺');
+
+  const toTop = config(overlayAt(100, 270, 800));
+  dragResize(toTop, grabOf(toTop, { handle: 'ne' }), 5000);
+  near(place(toTop, W, H).box.top, 0, '上辺');
+});
+
+test('窓を広げて枠が画面の右へはみ出しても、置き方と切り抜きは変わらない', () => {
+  const cfg = config(overlayAt(600, 270, 800));
+  const placed = placement(cfg);
+  cfg.fw = 1600;
+  normalize(cfg);
+  const { box } = place(cfg, W, H);
+  assert.ok(box.left + box.width > W);
+  assert.deepEqual(placement(cfg), placed);
+  assert.deepEqual([cfg.it, cfg.il, cfg.ir, cfg.ib], [0, 0, 0, 0]);
+});
+
+test('画面からはみ出した枠の辺を掴むと、画面の端に見えている位置から切り抜きが動く', () => {
+  const cfg = config({ ...overlayAt(600, 270, 800), fw: 1600 });
+  const before = place(cfg, W, H);
+  const overflow = before.box.left + before.box.width - W;
+  dragCrop(cfg, grabOf(cfg, { edge: 'r' }), -50, 0);
+  const after = place(cfg, W, H);
+  near(after.box.left + after.box.width, W - 50, '右辺');
+  near(cfg.ir, (overflow + 50) / before.scale, '切り抜いた量');
+  near(after.scale, before.scale, '拡大率');
+  near(after.box.left, before.box.left, '左辺');
+});
+
+test('画面からはみ出した枠の角を掴むと、画面の端に見えている位置から大きさが変わる', () => {
+  const cfg = config({ ...overlayAt(600, 270, 800), fw: 1600 });
+  dragResize(cfg, grabOf(cfg, { handle: 'se' }), -100);
+  const { box } = place(cfg, W, H);
+  near(box.left, 600, '左辺');
+  near(box.left + box.width, W - 100, '右辺');
 });
 
 test('重ねる配置では、領域に合わせる高さは求まらない', () => {

@@ -45,6 +45,10 @@ select { padding: 4px; }
 /* 字幕が領域いっぱいのとき、辺のつまみが境界線と重なって掴めなくなるので内側へずらす */
 #gizmo.split b[data-c=t] { top: 10px; } #gizmo.split b[data-c=b] { bottom: 10px; }
 #gizmo.split b[data-c=l] { left: 10px; } #gizmo.split b[data-c=r] { right: 10px; }
+#gizmo.at-l b[data-c=l] { left: 2px; } #gizmo.at-l i[data-h$=w] { left: 0; }
+#gizmo.at-r b[data-c=r] { right: 2px; } #gizmo.at-r i[data-h$=e] { right: 0; }
+#gizmo.at-t b[data-c=t] { top: 2px; } #gizmo.at-t i[data-h^=n] { top: 0; }
+#gizmo.at-b b[data-c=b] { bottom: 2px; } #gizmo.at-b i[data-h^=s] { bottom: 0; }
 /* スライドと字幕の境界。細い線だと掴みにくいので、見た目より広い当たり判定を持たせる */
 #divider { position: absolute; background: #e5484d; }
 #divider::before { content: ''; position: absolute; }
