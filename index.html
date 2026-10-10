@@ -23,6 +23,8 @@
   #stage.live #sel { display: block; }
   .sliders { display: grid; grid-template-columns: auto 1fr 3.5em; gap: 4px 10px; max-width: 520px; margin-top: 12px; align-items: center; }
   .sliders input[type=range] { width: 100%; }
+  /* display:noneだと動画PiPの元として再生されないことがあるので見えない大きさで置く */
+  #pipVideo { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
   .hint { color: #999; font-size: 12px; margin-top: 6px; }
 </style>
 </head>
@@ -35,11 +37,13 @@
   <button id="pick" class="primary">① 字幕画面を選択</button>
   <button id="show" disabled>② 字幕を表示</button>
   <button id="stop" disabled>共有を停止</button>
+  <label><input type="checkbox" id="frameless"> 枠なし(URLバーを出さない)</label>
   <label>背景色 <input type="color" id="bg"></label>
   <button id="reset">切り抜きを初期値に戻す</button>
 </div>
 
 <div id="stage"><video id="preview" muted playsinline autoplay></video><div id="sel"></div></div>
+<video id="pipVideo" muted playsinline autoplay></video>
 <div class="hint">プレビュー上をドラッグして字幕領域を囲む(またはスライダーで調整)。字幕ウィンドウを開いた後も調整は即時反映されます。</div>
 
 <div class="sliders">
@@ -52,7 +56,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const STORE_KEY = 'coefont-subtitle-overlay';
-const DEFAULTS = { x: 0, y: 0.62, w: 1, h: 0.38, bg: '#000000' };
+const DEFAULTS = { x: 0, y: 0.62, w: 1, h: 0.38, bg: '#000000', frameless: true };
 const MIN = 0.02;
 
 let cfg = { ...DEFAULTS };
@@ -60,10 +64,42 @@ try { Object.assign(cfg, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); }
 
 let stream = null;
 let out = null; // { win, box, video }
+let cropped = null; // 枠なしモード用に切り抜いた映像トラック
 
 const preview = $('preview');
 const stage = $('stage');
+const pipVideo = $('pipVideo');
 const hasDocPiP = 'documentPictureInPicture' in window;
+// Document PiPはオリジン表示の帯を消せないため、帯のない動画PiPに切り抜き済み映像を流す経路を別に持つ
+const hasFrameless = !!(window.MediaStreamTrackProcessor && window.MediaStreamTrackGenerator && document.pictureInPictureEnabled);
+const isShown = () => !!out || document.pictureInPictureElement === pipVideo;
+
+// canvas+タイマーで描くとこのタブが裏に回った時に間引かれるので、フレーム到着で駆動されるストリーム変換で切り抜く
+function startCropped(track) {
+  if (cropped) cropped.stop();
+  const gen = new MediaStreamTrackGenerator({ kind: 'video' });
+  const even = (v) => Math.max(2, Math.floor(v / 2) * 2);
+  const crop = new TransformStream({
+    transform(frame, ctl) {
+      try {
+        const r = frame.visibleRect;
+        // 色差が間引かれた形式では奇数座標で切れないので偶数に丸める
+        const x = Math.floor(cfg.x * r.width / 2) * 2, y = Math.floor(cfg.y * r.height / 2) * 2;
+        const width = even(Math.min(cfg.w * r.width, r.width - x));
+        const height = even(Math.min(cfg.h * r.height, r.height - y));
+        ctl.enqueue(new VideoFrame(frame, {
+          visibleRect: { x: r.x + x, y: r.y + y, width, height },
+          displayWidth: width, displayHeight: height,
+        }));
+      } catch {} finally {
+        frame.close();
+      }
+    },
+  });
+  new MediaStreamTrackProcessor({ track }).readable.pipeThrough(crop).pipeTo(gen.writable).catch(() => {});
+  cropped = gen;
+  attach(pipVideo, new MediaStream([gen]));
+}
 
 function setStatus(text, kind = '') {
   $('status').textContent = text;
@@ -111,6 +147,7 @@ function render() {
     $('o' + k).textContent = Math.round(cfg[k] * 100) + '%';
   }
   $('bg').value = cfg.bg;
+  $('frameless').checked = cfg.frameless && hasFrameless;
   layoutOut();
   save();
 }
@@ -118,7 +155,7 @@ function render() {
 function updateButtons() {
   $('show').disabled = !stream;
   $('stop').disabled = !stream;
-  $('show').textContent = out ? '② 字幕ウィンドウを開き直す' : '② 字幕を表示';
+  $('show').textContent = isShown() ? '② 字幕ウィンドウを開き直す' : '② 字幕を表示';
   stage.classList.toggle('live', !!stream);
 }
 
@@ -132,6 +169,7 @@ function dropStream(message, kind) {
   stream = null;
   attach(preview, null);
   if (out) attach(out.video, null);
+  if (cropped) { cropped.stop(); cropped = null; }
   updateButtons();
   setStatus(message, kind);
 }
@@ -159,6 +197,7 @@ async function pick() {
     dropStream('画面共有が終了しました。「字幕画面を選択」で再接続できます(字幕ウィンドウは開いたままで構いません)。', 'warn');
   attach(preview, s);
   if (out) attach(out.video, s);
+  if (hasFrameless) startCropped(s.getVideoTracks()[0]);
   updateButtons();
   const surface = s.getVideoTracks()[0].getSettings().displaySurface;
   setStatus(
@@ -172,6 +211,17 @@ async function pick() {
 async function show() {
   if (!stream) return;
   if (out) out.win.close();
+  if (cfg.frameless && hasFrameless) {
+    try {
+      await pipVideo.requestPictureInPicture();
+    } catch (e) {
+      setStatus(e.name === 'InvalidStateError'
+        ? 'まだ映像が届いていません。CoeFont側の画面が一度更新されてからもう一度押してください。'
+        : `字幕ウィンドウを開けませんでした: ${e.name}: ${e.message}`, 'error');
+    }
+    return;
+  }
+  if (document.pictureInPictureElement) await document.exitPictureInPicture().catch(() => {});
   const vw = preview.videoWidth || 1280, vh = preview.videoHeight || 720;
   const width = Math.round(Math.min(960, screen.availWidth * 0.6));
   const height = Math.max(60, Math.round(width * (cfg.h * vh) / (cfg.w * vw)));
@@ -248,7 +298,10 @@ for (const k of ['x', 'y', 'w', 'h']) {
   $('s' + k).addEventListener('input', (e) => { cfg[k] = e.target.value / 100; render(); });
 }
 $('bg').addEventListener('input', (e) => { cfg.bg = e.target.value; render(); });
-$('reset').addEventListener('click', () => { cfg = { ...DEFAULTS, bg: cfg.bg }; render(); });
+$('frameless').addEventListener('change', (e) => { cfg.frameless = e.target.checked; render(); });
+pipVideo.addEventListener('enterpictureinpicture', updateButtons);
+pipVideo.addEventListener('leavepictureinpicture', updateButtons);
+$('reset').addEventListener('click', () => { cfg = { ...DEFAULTS, bg: cfg.bg, frameless: cfg.frameless }; render(); });
 $('pick').addEventListener('click', pick);
 $('show').addEventListener('click', show);
 $('stop').addEventListener('click', () => dropStream('共有を停止しました。'));
@@ -264,6 +317,11 @@ if (!window.isSecureContext) {
   $('pick').disabled = true;
 } else if (!hasDocPiP) {
   setStatus('このブラウザは Document Picture-in-Picture 非対応です。通常のポップアップウィンドウで表示します(常に最前面にはなりません)。Chrome / Edge 推奨。', 'warn');
+}
+
+if (!hasFrameless) {
+  $('frameless').disabled = true;
+  $('frameless').parentElement.title = 'このブラウザでは使えません';
 }
 
 render();
