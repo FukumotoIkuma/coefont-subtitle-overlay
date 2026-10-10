@@ -55,4 +55,4 @@ select { padding: 4px; }
 [hidden] { display: none !important; }
 #note { position: absolute; left: 0; right: 0; top: 0; padding: 10px; text-align: center; color: #999; pointer-events: none; }
 
-#foot { margin-top: 10px; display: flex; justify-content: space-between; gap: 12px; }
+#build { margin-top: 10px; text-align: right; }
