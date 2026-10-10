@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CoeFont Subtitle Overlay</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 16px; font: 14px/1.5 system-ui, sans-serif; background: #16181c; color: #e6e6e6; }
+  h1 { font-size: 16px; margin: 0 0 12px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid #444; background: #2a2d33; color: inherit; cursor: pointer; }
+  button.primary { background: #2f6feb; border-color: #2f6feb; color: #fff; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  #status { padding: 8px 12px; border-radius: 6px; background: #22252b; margin-bottom: 12px; white-space: pre-line; }
+  #status.error { background: #4a1f1f; }
+  #status.warn { background: #4a3d1f; }
+  #stage { position: relative; overflow: hidden; max-width: 1100px; background: #000; border-radius: 6px; cursor: crosshair; touch-action: none; user-select: none; }
+  #stage video { display: block; width: 100%; }
+  #stage:not(.live) { aspect-ratio: 16 / 9; }
+  /* 選択範囲外を暗くするのに巨大なbox-shadowを使う(親のoverflow:hiddenで切る) */
+  #sel { position: absolute; border: 2px solid #2f6feb; box-shadow: 0 0 0 9999px rgba(0, 0, 0, .55); pointer-events: none; display: none; }
+  #stage.live #sel { display: block; }
+  .sliders { display: grid; grid-template-columns: auto 1fr 3.5em; gap: 4px 10px; max-width: 520px; margin-top: 12px; align-items: center; }
+  .sliders input[type=range] { width: 100%; }
+  /* display:noneだと動画PiPの元として再生されないことがあるので見えない大きさで置く */
+  #pipVideo { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  .hint { color: #999; font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>CoeFont Subtitle Overlay(字幕だけの小窓版)</h1>
+<p class="hint">スライドに字幕を透過して重ねる通常版は <a href="./" style="color:#7aa7ff">こちら</a>。この版は、全画面のスライドショーより手前に通常版を出せない環境向け。</p>
+
+<div id="status">CoeFont の通訳タブを別タブで開いてから「字幕画面を選択」を押してください。</div>
+
+<div class="bar">
+  <button id="pick" class="primary">① 字幕画面を選択</button>
+  <button id="show" disabled>② 字幕を表示</button>
+  <button id="stop" disabled>共有を停止</button>
+  <label><input type="checkbox" id="frameless"> 枠なし(URLバーを出さない)</label>
+  <label>背景色 <input type="color" id="bg"></label>
+  <button id="reset">切り抜きを初期値に戻す</button>
+</div>
+
+<div id="stage"><video id="preview" muted playsinline autoplay></video><div id="sel"></div></div>
+<video id="pipVideo" muted playsinline autoplay></video>
+<div class="hint">プレビュー上をドラッグして字幕領域を囲む(またはスライダーで調整)。字幕ウィンドウを開いた後も調整は即時反映されます。</div>
+
+<div class="sliders">
+  <label for="sy">上端</label><input type="range" id="sy" min="0" max="98" step="0.5"><output id="oy"></output>
+  <label for="sh">高さ</label><input type="range" id="sh" min="2" max="100" step="0.5"><output id="oh"></output>
+  <label for="sx">左端</label><input type="range" id="sx" min="0" max="98" step="0.5"><output id="ox"></output>
+  <label for="sw">幅</label><input type="range" id="sw" min="2" max="100" step="0.5"><output id="ow"></output>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const STORE_KEY = 'coefont-subtitle-overlay';
+const DEFAULTS = { x: 0, y: 0.62, w: 1, h: 0.38, bg: '#000000', frameless: true };
+const MIN = 0.02;
+
+let cfg = { ...DEFAULTS };
+try { Object.assign(cfg, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); } catch {}
+
+let stream = null;
+let out = null; // { win, box, video }
+let cropped = null; // 枠なしモード用に切り抜いた映像トラック
+
+const preview = $('preview');
+const stage = $('stage');
+const pipVideo = $('pipVideo');
+const hasDocPiP = 'documentPictureInPicture' in window;
+// Document PiPはオリジン表示の帯を消せないため、帯のない動画PiPに切り抜き済み映像を流す経路を別に持つ
+const hasFrameless = !!(window.MediaStreamTrackProcessor && window.MediaStreamTrackGenerator && document.pictureInPictureEnabled);
+const isShown = () => !!out || document.pictureInPictureElement === pipVideo;
+
+// canvas+タイマーで描くとこのタブが裏に回った時に間引かれるので、フレーム到着で駆動されるストリーム変換で切り抜く
+function startCropped(track) {
+  if (cropped) cropped.stop();
+  const gen = new MediaStreamTrackGenerator({ kind: 'video' });
+  const even = (v) => Math.max(2, Math.floor(v / 2) * 2);
+  const crop = new TransformStream({
+    transform(frame, ctl) {
+      try {
+        const r = frame.visibleRect;
+        // 色差が間引かれた形式では奇数座標で切れないので偶数に丸める
+        const x = Math.floor(cfg.x * r.width / 2) * 2, y = Math.floor(cfg.y * r.height / 2) * 2;
+        const width = even(Math.min(cfg.w * r.width, r.width - x));
+        const height = even(Math.min(cfg.h * r.height, r.height - y));
+        ctl.enqueue(new VideoFrame(frame, {
+          visibleRect: { x: r.x + x, y: r.y + y, width, height },
+          displayWidth: width, displayHeight: height,
+        }));
+      } catch {} finally {
+        frame.close();
+      }
+    },
+  });
+  new MediaStreamTrackProcessor({ track }).readable.pipeThrough(crop).pipeTo(gen.writable).catch(() => {});
+  cropped = gen;
+  attach(pipVideo, new MediaStream([gen]));
+}
+
+function setStatus(text, kind = '') {
+  $('status').textContent = text;
+  $('status').className = kind;
+}
+
+function save() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch {}
+}
+
+function clampCrop() {
+  cfg.x = Math.min(Math.max(cfg.x, 0), 1 - MIN);
+  cfg.y = Math.min(Math.max(cfg.y, 0), 1 - MIN);
+  cfg.w = Math.min(Math.max(cfg.w, MIN), 1 - cfg.x);
+  cfg.h = Math.min(Math.max(cfg.h, MIN), 1 - cfg.y);
+}
+
+// 切り抜き範囲をウィンドウ内に最大サイズで収める。videoを拡大してboxのoverflowで切るだけなので毎フレーム処理は不要
+function layoutOut() {
+  if (!out) return;
+  const { win, box, video } = out;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return;
+  const cw = cfg.w * vw, ch = cfg.h * vh;
+  const s = Math.min(win.innerWidth / cw, win.innerHeight / ch);
+  box.style.width = cw * s + 'px';
+  box.style.height = ch * s + 'px';
+  video.style.width = vw * s + 'px';
+  video.style.height = vh * s + 'px';
+  video.style.left = -cfg.x * vw * s + 'px';
+  video.style.top = -cfg.y * vh * s + 'px';
+  win.document.body.style.background = cfg.bg;
+}
+
+function render() {
+  clampCrop();
+  const pct = (v) => (v * 100).toFixed(1);
+  const sel = $('sel');
+  sel.style.left = pct(cfg.x) + '%';
+  sel.style.top = pct(cfg.y) + '%';
+  sel.style.width = pct(cfg.w) + '%';
+  sel.style.height = pct(cfg.h) + '%';
+  for (const k of ['x', 'y', 'w', 'h']) {
+    $('s' + k).value = cfg[k] * 100;
+    $('o' + k).textContent = Math.round(cfg[k] * 100) + '%';
+  }
+  $('bg').value = cfg.bg;
+  $('frameless').checked = cfg.frameless && hasFrameless;
+  layoutOut();
+  save();
+}
+
+function updateButtons() {
+  $('show').disabled = !stream;
+  $('stop').disabled = !stream;
+  $('show').textContent = isShown() ? '② 字幕ウィンドウを開き直す' : '② 字幕を表示';
+  stage.classList.toggle('live', !!stream);
+}
+
+function attach(video, s) {
+  video.srcObject = s;
+  if (s) video.play().catch(() => {});
+}
+
+function dropStream(message, kind) {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = null;
+  attach(preview, null);
+  if (out) attach(out.video, null);
+  if (cropped) { cropped.stop(); cropped = null; }
+  updateButtons();
+  setStatus(message, kind);
+}
+
+async function pick() {
+  let s;
+  try {
+    s = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 15, max: 30 } },
+      audio: false,
+      selfBrowserSurface: 'exclude',
+      // 許可すると「代わりにこのタブを共有」のボタンが無関係なタブにまで出る
+      surfaceSwitching: 'exclude',
+    });
+  } catch (e) {
+    if (e.name === 'NotAllowedError') {
+      if (!stream) setStatus('画面の選択がキャンセル(または拒否)されました。もう一度「字幕画面を選択」を押してください。\nmacOSで毎回失敗する場合は、システム設定 > プライバシーとセキュリティ > 画面収録 でブラウザを許可してください。', 'warn');
+    } else {
+      setStatus(`画面を取得できませんでした: ${e.name}: ${e.message}`, 'error');
+    }
+    return;
+  }
+  if (stream) stream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+  stream = s;
+  s.getVideoTracks()[0].onended = () =>
+    dropStream('画面共有が終了しました。「字幕画面を選択」で再接続できます(字幕ウィンドウは開いたままで構いません)。', 'warn');
+  attach(preview, s);
+  if (out) attach(out.video, s);
+  if (hasFrameless) startCropped(s.getVideoTracks()[0]);
+  updateButtons();
+  const surface = s.getVideoTracks()[0].getSettings().displaySurface;
+  setStatus(
+    surface && surface !== 'browser'
+      ? '取得中(タブ以外を共有しています。CoeFontのタブを選ぶと、タブが裏に回っても更新が止まりにくくなります)。'
+      : '取得中。字幕領域を調整して「字幕を表示」を押してください。',
+    surface && surface !== 'browser' ? 'warn' : ''
+  );
+}
+
+async function show() {
+  if (!stream) return;
+  if (out) out.win.close();
+  if (cfg.frameless && hasFrameless) {
+    try {
+      await pipVideo.requestPictureInPicture();
+    } catch (e) {
+      setStatus(e.name === 'InvalidStateError'
+        ? 'まだ映像が届いていません。CoeFont側の画面が一度更新されてからもう一度押してください。'
+        : `字幕ウィンドウを開けませんでした: ${e.name}: ${e.message}`, 'error');
+    }
+    return;
+  }
+  if (document.pictureInPictureElement) await document.exitPictureInPicture().catch(() => {});
+  const vw = preview.videoWidth || 1280, vh = preview.videoHeight || 720;
+  const width = Math.round(Math.min(960, screen.availWidth * 0.6));
+  const height = Math.max(60, Math.round(width * (cfg.h * vh) / (cfg.w * vw)));
+  let win;
+  try {
+    win = hasDocPiP
+      ? await documentPictureInPicture.requestWindow({ width, height })
+      : window.open('', 'coefont-subtitles', `popup,width=${width},height=${height}`);
+  } catch (e) {
+    setStatus(`字幕ウィンドウを開けませんでした: ${e.name}: ${e.message}`, 'error');
+    return;
+  }
+  if (!win) {
+    setStatus('ポップアップがブロックされました。このサイトのポップアップを許可してください。', 'error');
+    return;
+  }
+  const doc = win.document;
+  doc.title = '字幕';
+  doc.body.innerHTML = '';
+  doc.body.style.cssText = 'margin:0;height:100vh;overflow:hidden;display:flex;align-items:center;justify-content:center;';
+  const box = doc.createElement('div');
+  box.style.cssText = 'position:relative;overflow:hidden;flex:none;';
+  const video = doc.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.autoplay = true;
+  video.style.cssText = 'position:absolute;max-width:none;';
+  box.append(video);
+  doc.body.append(box);
+
+  const self = { win, box, video };
+  out = self;
+  win.addEventListener('resize', layoutOut);
+  video.addEventListener('loadedmetadata', layoutOut);
+  video.addEventListener('resize', layoutOut); // 共有元タブのサイズ変更
+  win.addEventListener('pagehide', () => {
+    if (out === self) { out = null; updateButtons(); }
+  });
+  attach(video, stream);
+  layoutOut();
+  updateButtons();
+}
+
+// --- 切り抜き操作 ---
+let dragStart = null;
+const fracAt = (e) => {
+  const r = stage.getBoundingClientRect();
+  return {
+    x: Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1),
+    y: Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1),
+  };
+};
+stage.addEventListener('pointerdown', (e) => {
+  if (!stream) return;
+  dragStart = fracAt(e);
+  stage.setPointerCapture(e.pointerId);
+});
+stage.addEventListener('pointermove', (e) => {
+  if (!dragStart) return;
+  const p = fracAt(e);
+  // クリックだけで極小の範囲になるのを避ける
+  if (Math.abs(p.x - dragStart.x) < MIN || Math.abs(p.y - dragStart.y) < MIN) return;
+  cfg.x = Math.min(p.x, dragStart.x);
+  cfg.y = Math.min(p.y, dragStart.y);
+  cfg.w = Math.abs(p.x - dragStart.x);
+  cfg.h = Math.abs(p.y - dragStart.y);
+  render();
+});
+const endDrag = () => { dragStart = null; };
+stage.addEventListener('pointerup', endDrag);
+stage.addEventListener('pointercancel', endDrag);
+
+for (const k of ['x', 'y', 'w', 'h']) {
+  $('s' + k).addEventListener('input', (e) => { cfg[k] = e.target.value / 100; render(); });
+}
+$('bg').addEventListener('input', (e) => { cfg.bg = e.target.value; render(); });
+$('frameless').addEventListener('change', (e) => { cfg.frameless = e.target.checked; render(); });
+pipVideo.addEventListener('enterpictureinpicture', updateButtons);
+pipVideo.addEventListener('leavepictureinpicture', updateButtons);
+$('reset').addEventListener('click', () => { cfg = { ...DEFAULTS, bg: cfg.bg, frameless: cfg.frameless }; render(); });
+$('pick').addEventListener('click', pick);
+$('show').addEventListener('click', show);
+$('stop').addEventListener('click', () => dropStream('共有を停止しました。'));
+// このタブを閉じると字幕ウィンドウの映像も止まるので道連れにする
+window.addEventListener('pagehide', () => { if (out) out.win.close(); });
+
+// --- 環境判定 ---
+if (!window.isSecureContext) {
+  setStatus('このページは HTTPS(または localhost)で開く必要があります。', 'error');
+  $('pick').disabled = true;
+} else if (!navigator.mediaDevices?.getDisplayMedia) {
+  setStatus('このブラウザは画面共有(getDisplayMedia)に対応していません。デスクトップ版の Chrome / Edge を使ってください。', 'error');
+  $('pick').disabled = true;
+} else if (!hasDocPiP) {
+  setStatus('このブラウザは Document Picture-in-Picture 非対応です。通常のポップアップウィンドウで表示します(常に最前面にはなりません)。Chrome / Edge 推奨。', 'warn');
+}
+
+if (!hasFrameless) {
+  $('frameless').disabled = true;
+  $('frameless').parentElement.title = 'このブラウザでは使えません';
+}
+
+render();
+updateButtons();
+</script>
+</body>
+</html>
