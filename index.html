@@ -46,9 +46,14 @@
   #gizmo i[data-h=se] { right: -7px; bottom: -7px; cursor: nwse-resize; }
   #gizmo i[data-h=ne] { right: -7px; top: -7px; cursor: nesw-resize; }
   #gizmo i[data-h=sw] { left: -7px; bottom: -7px; cursor: nesw-resize; }
-  /* 下に並べる配置では帯の位置と幅が決まっているので、移動と拡大縮小のつまみは出さない */
-  #gizmo.below { cursor: ns-resize; }
-  #gizmo.below i, #gizmo.below b[data-c=b] { display: none; }
+  /* 下に並べる配置では字幕は領域に収まる大きさで中央に置かれるので、移動と拡大縮小のつまみは出さない */
+  #gizmo.below { cursor: default; }
+  #gizmo.below i { display: none; }
+  /* 字幕が領域いっぱいの高さのとき、上辺のつまみが境界線と重なって掴めなくなるので内側へずらす */
+  #gizmo.below b[data-c=t] { top: 10px; }
+  /* スライドと字幕の境界。細い線だと掴みにくいので、見た目より広い当たり判定を持たせる */
+  #divider { position: absolute; left: 0; right: 0; height: 4px; margin-top: -2px; background: #e5484d; cursor: ns-resize; }
+  #divider::before { content: ''; position: absolute; left: 0; right: 0; top: -7px; bottom: -7px; }
   [hidden] { display: none !important; }
   #note { position: absolute; left: 0; right: 0; top: 0; padding: 10px; text-align: center; color: #999; pointer-events: none; }
 
@@ -61,6 +66,7 @@
 
 <div id="stage">
   <div id="gizmo"><span id="gizmoLabel"></span><b data-c="t"></b><b data-c="b"></b><b data-c="l"></b><b data-c="r"></b><i data-h="nw"></i><i data-h="ne"></i><i data-h="sw"></i><i data-h="se"></i></div>
+  <div id="divider" hidden></div>
   <div id="note"></div>
 </div>
 
@@ -83,7 +89,7 @@
         <option value="overlay">スライドに重ねる</option>
         <option value="below">スライドの下に並べる</option>
       </select></div>
-    <div class="row" id="rowBand"><label for="band">字幕の帯の高さ</label><input type="range" id="band" min="8" max="50" step="0.5"><output id="oBand"></output></div>
+    <div class="row" id="rowBand"><label for="band">字幕の領域の高さ</label><input type="range" id="band" min="8" max="50" step="0.5"><output id="oBand"></output></div>
     <div class="row" id="rowBlend"><label for="blend">背景の透過</label>
       <select id="blend">
         <option value="normal">なし</option>
@@ -120,12 +126,10 @@ const URL_KEY = 'coefont-subtitle-overlay:url';
 // 切り抜きは割合ではなく四辺からの余白(px)で持つ。こうすると描く大きさを変えても切った位置がずれない
 const CROP_DEFAULTS = { fw: 960, fh: 540, it: 0, il: 0, ir: 0, ib: 0 };
 const POS_DEFAULTS = { subX: 0.25, subY: 0.4, subW: 0.5 };
-// band: 「下に並べる」配置で字幕の帯が占める高さの割合
+// band: 「下に並べる」配置で字幕の領域が占める高さの割合。境界の位置だけを表し、CoeFontの切り抜きとは無関係
 const DEFAULTS = { ...CROP_DEFAULTS, ...POS_DEFAULTS, subOpacity: 1, blend: 'normal', layout: 'overlay', band: 0.22 };
 const LAYOUTS = ['overlay', 'below'];
 const BAND_RANGE = [0.08, 0.5];
-// 「下に並べる」配置ではCoeFontを描く高さが帯から決まるので、上下の切り抜きはこの範囲で受ける
-const MAX_INSET = 900;
 const BLENDS = ['normal', 'multiply', 'screen'];
 const FW_RANGE = [400, 1600];
 const MIN_PX = 40;
@@ -184,9 +188,8 @@ function normalize() {
   cfg.ir = clamp(cfg.ir, 0, cfg.fw - cfg.il - MIN_PX);
   if (!LAYOUTS.includes(cfg.layout)) cfg.layout = DEFAULTS.layout;
   cfg.band = clamp(cfg.band, ...BAND_RANGE);
-  const below = cfg.layout === 'below';
-  cfg.it = clamp(cfg.it, 0, below ? MAX_INSET : cfg.fh - MIN_PX);
-  cfg.ib = clamp(cfg.ib, 0, below ? MAX_INSET : cfg.fh - cfg.it - MIN_PX);
+  cfg.it = clamp(cfg.it, 0, cfg.fh - MIN_PX);
+  cfg.ib = clamp(cfg.ib, 0, cfg.fh - cfg.it - MIN_PX);
   cfg.subW = clamp(cfg.subW, 0.1, 1);
   cfg.subX = clamp(cfg.subX, 0, 1 - cfg.subW);
   cfg.subY = clamp(cfg.subY, 0, 0.98);
@@ -237,19 +240,19 @@ function layoutScene(sc) {
   sc.sub.style.display = url ? '' : 'none';
   // 出力先の大きさでCoeFont側のレイアウトが変わると切り抜きがずれるので、決めた大きさで描かせて拡大縮小だけする
   const below = cfg.layout === 'below';
-  const cw = cfg.fw - cfg.il - cfg.ir;
-  // 下に並べる配置では、切り抜いた残りが帯をちょうど埋める高さでCoeFontを描かせる(帯に余白も欠けも出さない)
-  const fh = below ? cfg.it + cfg.ib + cw * cfg.band * H / W : cfg.fh;
-  const ch = fh - cfg.it - cfg.ib;
+  const fh = cfg.fh;
+  const cw = cfg.fw - cfg.il - cfg.ir, ch = fh - cfg.it - cfg.ib;
   sc.content.style.width = cfg.fw + 'px';
   sc.content.style.height = fh + 'px';
-  // 下に並べる配置では、スライドを帯の上の領域に縮めて収める
+  // 下に並べる配置では、スライドを字幕の領域の上に縮めて収める
   sc.slide.style.height = composing && below ? (1 - cfg.band) * 100 + '%' : '';
 
   let scale, box, shift = [0, 0];
   if (composing && below) {
-    scale = W / cw;
-    box = { left: 0, top: H * (1 - cfg.band), width: W, height: H * cfg.band };
+    // 見せる範囲は利用者が決めた切り抜きのまま。領域に合わせて切り足しはせず、収まる大きさに拡大縮小して中央に置く
+    const bandH = H * cfg.band;
+    scale = Math.min(W / cw, bandH / ch);
+    box = { left: (W - cw * scale) / 2, top: H - bandH + (bandH - ch * scale) / 2, width: cw * scale, height: ch * scale };
     shift = [-cfg.il, -cfg.it];
   } else if (composing) {
     const width = cfg.subW * W;
@@ -295,6 +298,8 @@ function layout() {
   const box = layoutScene(ctl);
   gizmo.style.display = url ? 'block' : 'none';
   gizmo.classList.toggle('below', cfg.layout === 'below');
+  $('divider').hidden = cfg.layout !== 'below';
+  $('divider').style.top = (1 - cfg.band) * 100 + '%';
   for (const k in box) gizmo.style[k] = box[k] + 'px';
   if (out) layoutScene(out.scene);
   $('note').textContent = !url ? '「ソース」に CoeFont の招待URLを貼って読み込む'
@@ -315,10 +320,10 @@ function render() {
   $('band').value = cfg.band * 100;
   $('oBand').textContent = Math.round(cfg.band * 100) + '%';
   $('rowBand').hidden = !below;
-  for (const id of ['rowBlend', 'rowOpacity', 'rowFrameH', 'btnResetPos']) $(id).hidden = below;
-  $('gizmoLabel').textContent = below ? '字幕の帯(実物は出力側に表示)' : '字幕(実物は出力側に表示)';
+  for (const id of ['rowBlend', 'rowOpacity', 'btnResetPos']) $(id).hidden = below;
+  $('gizmoLabel').textContent = '字幕(実物は出力側に表示)';
   $('gizmoHint').textContent = below
-    ? 'プレビューの字幕の帯: 上下にドラッグで帯の高さ、青い辺で切り抜き。'
+    ? 'プレビュー: 赤い線を上下にドラッグでスライドと字幕の境界。字幕の枠の青い辺で切り抜き(境界を動かしても切り抜きは変わらない)。'
     : 'プレビューの字幕の枠: 中をドラッグで移動、赤い角で拡大縮小、青い辺で切り抜き。';
   const fullLabel = full ? '字幕表示に戻す' : 'CoeFont の画面全体を表示';
   $('btnFull').textContent = '出力側: ' + fullLabel;
@@ -486,12 +491,12 @@ gizmo.addEventListener('pointermove', (e) => {
   const { handle, edge, start, W, H, l, t, w, h } = grab;
   const dx = e.clientX - grab.px, dy = e.clientY - grab.py;
   if (cfg.layout === 'below') {
-    // 帯は位置も幅も固定なので、辺は切り抜く量だけを、帯そのもののドラッグは高さだけを変える
-    const scale = W / (start.fw - start.il - start.ir);
+    // 字幕は領域に収まるよう自動で置かれるので、ここで変えられるのは切り抜きだけ。境界の位置は別の線(divider)で動かす
+    const scale = w / (start.fw - start.il - start.ir);
     if (edge === 't') cfg.it = start.it + dy / scale;
+    else if (edge === 'b') cfg.ib = start.ib - dy / scale;
     else if (edge === 'l') cfg.il = start.il + dx / scale;
     else if (edge === 'r') cfg.ir = start.ir - dx / scale;
-    else cfg.band = start.band - dy / H;
   } else if (edge) {
     // 切り抜きでは拡大率を変えず、つかんだ辺だけがマウスに付いてくるようにする(反対側の辺と中身は動かさない)
     const cw = start.fw - start.il - start.ir, ch = start.fh - start.it - start.ib;
@@ -526,6 +531,23 @@ gizmo.addEventListener('pointermove', (e) => {
   render();
 });
 for (const ev of ['pointerup', 'pointercancel']) gizmo.addEventListener(ev, () => { grab = null; markAdjusting(false); });
+
+// --- 下に並べる配置: スライドと字幕の境界線 ---
+const divider = $('divider');
+let dividing = false;
+divider.addEventListener('pointerdown', (e) => {
+  dividing = true;
+  divider.setPointerCapture(e.pointerId);
+  e.preventDefault();
+  markAdjusting(true);
+});
+divider.addEventListener('pointermove', (e) => {
+  if (!dividing) return;
+  const r = stage.getBoundingClientRect();
+  cfg.band = 1 - (e.clientY - r.top) / r.height;
+  render();
+});
+for (const ev of ['pointerup', 'pointercancel']) divider.addEventListener(ev, () => { dividing = false; markAdjusting(false); });
 
 // --- 操作 ---
 const actions = {
