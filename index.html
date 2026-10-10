@@ -124,20 +124,18 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-// 初期値を「切り抜きなし」に変えたので、以前の版が保存した切り抜きを引き継がないようキーを分ける
-const STORE_KEY = 'coefont-subtitle-overlay:v3';
+const STORE_KEY = 'coefont-subtitle-overlay';
 const URL_KEY = 'coefont-subtitle-overlay:url';
 // 初期状態では切り抜かない。どこを見せるかは利用者が決めるもので、最初から操作部を切り落とすと
 // CoeFont側の設定(文字サイズ、Single/All、言語)に触れなくなる。
 // 切り抜きは割合ではなく四辺からの余白(px)で持つ。こうすると描く大きさを変えても切った位置がずれない
-// 窓の形と切り抜きは別々の設定なので、初期値も初期化も分けておく
+// 窓の形と切り抜きの初期値は1つにまとめない。まとめると、切り抜きを初期化したときに窓の形まで戻ってしまう
 const WINDOW_DEFAULTS = { fw: 960, fh: 540 };
 const CROP_DEFAULTS = { it: 0, il: 0, ir: 0, ib: 0 };
 const POS_DEFAULTS = { subX: 0.25, subY: 0.4, subW: 0.5 };
-// band: 並べる配置で字幕の領域が占める割合(下なら高さ、左右なら幅)。境界の位置だけを表し、CoeFontの切り抜きとは無関係
 const DEFAULTS = { ...WINDOW_DEFAULTS, ...CROP_DEFAULTS, ...POS_DEFAULTS, subOpacity: 1, blend: 'normal', layout: 'overlay', band: 0.22 };
-// 配置の定義。split を持つものが並べる配置で、axis は境界線が区切る向き(x=左右, y=上下)、subFirst は字幕の領域が先(左/上)に来るか。
-// 選択肢・領域の計算・境界線の向き・ドラッグをすべてここから導くので、画面側は配置を増やすときここに1行足せば足りる
+// 配置ごとの分岐を選択肢・領域の計算・境界線・ドラッグの各所に書かない。書くと配置を足すたびに直し漏れが出るので、
+// すべてこの表から導く(axis: 境界線が区切る向き、subFirst: 字幕の領域が左/上に来るか)
 const LAYOUTS = {
   overlay: { label: 'スライドに重ねる' },
   below: { label: 'スライドの下に並べる', split: { axis: 'y', subFirst: false } },
@@ -147,8 +145,7 @@ const LAYOUTS = {
 const RECT_KEYS = ['left', 'top', 'width', 'height'];
 const BAND_RANGE = [0.08, 0.6];
 const BLENDS = ['normal', 'multiply', 'screen'];
-// CoeFontを描く窓の大きさ(px)。左右に並べる配置では縦長にしたいので、高さは幅より大きく取れるようにしておく
-// 高さの下限を低くしてあるのは、下に並べる配置の細い領域に形を合わせると100px前後になるため
+// 高さの範囲を幅と同じにしない。左右に並べる配置では縦長に、下に並べる配置の細い領域では100px前後にしたい
 const WIN_W_RANGE = [300, 1600];
 const WIN_H_RANGE = [60, 2000];
 const WINDOW_SLIDERS = [
@@ -156,10 +153,8 @@ const WINDOW_SLIDERS = [
   { input: 'winH', output: 'oWinH', key: 'fh', range: WIN_H_RANGE, name: '高さ' },
 ];
 const MIN_PX = 40;
-// 重ねる配置で字幕の枠が取れる最小の幅(画面幅に対する割合)
-const MIN_SUB_W = 0.1;
-// 窓の高さがこの差(px)以内なら、字幕の領域に合っていると見なす
-const FIT_TOLERANCE = 1;
+const MIN_OVERLAY_WIDTH_RATIO = 0.1;
+const FIT_TOLERANCE_PX = 1;
 // 手元のプレビューと出力ウィンドウは別文書なので、同じ見た目の定義を両方へ差し込む
 const SCENE_CSS = `
   .scene { position: relative; overflow: hidden; background: #000; user-select: none; touch-action: none; }
@@ -181,13 +176,12 @@ const OUTPUT_CSS = `
   #bar button.sub { background: #444; }
 `;
 
-let cfg = { ...DEFAULTS };
-try { Object.assign(cfg, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); } catch {}
+// 保存値を丸ごと取り込まない。項目を変えたあとも、使わなくなった古い項目が保存され続けてしまう
+const stored = (() => { try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch { return null; } })();
+const cfg = Object.fromEntries(Object.keys(DEFAULTS).map((k) => [k, stored?.[k] ?? DEFAULTS[k]]));
 
-// 出力側をCoeFontの画面全体の表示にしているか。普段は字幕欄だけを出し、CoeFont自体の設定を触るときだけ全体を出す
-let full = false;
+let showWholePage = false;
 let url = null;
-// 位置や大きさを調整している最中か(出力側に枠線を出す間)
 let adjusting = false;
 let adjustTimer = 0;
 let slideStream = null;
@@ -201,7 +195,6 @@ const gizmo = $('gizmo');
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
 const currentSplit = () => LAYOUTS[cfg.layout].split;
 const isSplit = () => !!currentSplit();
-// 切り抜いたあとに残る範囲の大きさ(窓のpx)
 const cropSize = (c) => ({ cw: c.fw - c.il - c.ir, ch: c.fh - c.it - c.ib });
 // 窓の幅(fw)・高さ(fh)に指定できる範囲。窓を縮めても切り抜きは変えない(詰めて合わせると、窓を戻しても切った位置が
 // 元に戻らない)ので、切り抜きが収まらなくなる大きさを下限にして、窓のほうを縮めさせない
@@ -236,17 +229,15 @@ function addStyle(doc, css) {
   doc.head.append(style);
 }
 
-// 操作のたびに、設定どうしの制約を満たす値へ寄せる
 function normalize() {
   cfg.fw = clamp(cfg.fw, ...windowRange('fw'));
   cfg.fh = clamp(cfg.fh, ...windowRange('fh'));
   cfg.band = clamp(cfg.band, ...BAND_RANGE);
-  cfg.subW = clamp(cfg.subW, MIN_SUB_W, 1);
+  cfg.subW = clamp(cfg.subW, MIN_OVERLAY_WIDTH_RATIO, 1);
   cfg.subX = clamp(cfg.subX, 0, 1 - cfg.subW);
   cfg.subY = clamp(cfg.subY, 0, 0.98);
 }
 
-// --- スライド+字幕の合成画面 ---
 // 出力ウィンドウ(real)にはCoeFontのiframeを置く。手元のプレビューに同じiframeを置くと二重に参加して
 // 音声も二重になるので、手元は同じ寸法の代用の板で位置と範囲だけを示す
 function makeScene(doc, root, real) {
@@ -281,7 +272,6 @@ function makeScene(doc, root, real) {
   return { doc, root, slide, shade, sub, content, crop, sel, outline, real, W: 0, H: 0 };
 }
 
-// 並べる配置での、スライドの領域と字幕の領域。重ねる配置では分けないので null
 function regions(W, H) {
   const sp = currentSplit();
   if (!sp) return null;
@@ -298,8 +288,8 @@ function regions(W, H) {
 
 function layoutScene(sc) {
   const W = sc.W = sc.root.clientWidth, H = sc.H = sc.root.clientHeight;
-  // 手元のプレビューは常に聴衆に見える構図を示す。全体表示に切り替わるのは出力側だけ
-  const composing = !(sc.real && full);
+  // 手元のプレビューまで全体表示にはしない。聴衆に見える構図を、手元では常に確かめられるようにしておく
+  const composing = !(sc.real && showWholePage);
   // スライドの映像自体をvisibilityやopacityで隠すと、戻したあとも黒いまま再描画されない環境がある(Chromium系の組み込みブラウザで再現)。
   // 映像には触らず、上に黒い幕を掛けて隠す
   sc.shade.style.display = composing ? 'none' : '';
@@ -310,7 +300,6 @@ function layoutScene(sc) {
   // 出力先の大きさでCoeFont側のレイアウトが変わると切り抜きがずれるので、決めた大きさで描かせて拡大縮小だけする
   sc.content.style.width = cfg.fw + 'px';
   sc.content.style.height = fh + 'px';
-  // 並べる配置では、スライドを自分の領域に縮めて収める(空にするとCSSの全面表示に戻る)
   for (const k of RECT_KEYS) sc.slide.style[k] = split ? split.slide[k] + 'px' : '';
 
   let scale, box, shift = [0, 0];
@@ -333,7 +322,6 @@ function layoutScene(sc) {
     box = { left: cfg.subX * W, top: cfg.subY * H, width, height: ch * scale };
     shift = [-cfg.il, -cfg.it];
   } else {
-    // CoeFont自体の設定は、切り抜く前の全体を見せて行う
     scale = Math.min(W / cfg.fw, H / fh);
     box = { left: (W - cfg.fw * scale) / 2, top: (H - fh * scale) / 2, width: cfg.fw * scale, height: fh * scale };
   }
@@ -416,7 +404,7 @@ function render() {
   $('gizmoHint').textContent = split
     ? 'プレビュー: 赤い線をドラッグでスライドと字幕の境界。字幕の枠の青い辺で切り抜き(境界を動かしても切り抜きは変わらない)。'
     : 'プレビューの字幕の枠: 中をドラッグで移動、赤い角で拡大縮小、青い辺で切り抜き。';
-  const fullLabel = full ? '字幕表示に戻す' : 'CoeFont の画面全体を表示';
+  const fullLabel = showWholePage ? '字幕表示に戻す' : 'CoeFont の画面全体を表示';
   $('btnFull').textContent = '出力側: ' + fullLabel;
   $('btnFull').disabled = !out;
   if (out) out.fullBtn.textContent = fullLabel;
@@ -446,7 +434,6 @@ function attach(video, s) {
   if (s) video.play().catch(() => {});
 }
 
-// --- 出力ウィンドウ ---
 function openOutput() {
   if (out && !out.win.closed) {
     out.win.focus();
@@ -479,7 +466,7 @@ function openOutput() {
   attach(self.scene.slide, slideStream);
   go.addEventListener('click', () => {
     // 全体表示のまま聴衆に出してしまわないよう、全画面にするときは字幕表示へ戻す
-    full = false;
+    showWholePage = false;
     render();
     doc.documentElement.requestFullscreen().catch(() => {});
   });
@@ -492,7 +479,7 @@ function openOutput() {
   win.addEventListener('pagehide', () => {
     if (out !== self) return;
     out = null;
-    full = false;
+    showWholePage = false;
     render();
     setStatus('出力ウィンドウが閉じられました。「出力ウィンドウを開く」で開き直せます(CoeFont は読み込み直しになります)。', 'warn');
   });
@@ -500,7 +487,6 @@ function openOutput() {
   return self;
 }
 
-// --- ソース ---
 // CoeFontはタブ共有で取り込まず、ページそのものを埋め込む。タブ共有を使うと、共有中はChromeが
 // 同じプロファイルの全タブ(出力ウィンドウを含む)に「共有しています」バーを出し、ページ側から消せないため
 function loadUrl() {
@@ -561,15 +547,14 @@ async function pickSlide() {
   }
 }
 
-// 掴んでいる間は出し続け、離したあとも位置を見届けられるよう少しだけ残す
+// 離した瞬間には枠線を消さない。出力側で最終的な位置を見届ける間がなくなる
 function markAdjusting(holding) {
   adjusting = true;
   clearTimeout(adjustTimer);
   if (!holding) adjustTimer = setTimeout(() => { adjusting = false; layout(); }, 1500);
 }
 
-// 切り抜いた残りが字幕の領域と同じ縦横比になる窓の高さ(wanted)と、それを指定できるか・いま合っているか。並べる配置でなければ null。
-// 聴衆が見るのは出力側なので、開いていればその画面の形を基準にする(手元のプレビューとは縦横比が違うことがある)
+// 出力を開いているときは、手元のプレビューを基準にしない。聴衆が見るのは出力側で、手元とは縦横比が違うことがある
 function fitGoal() {
   if (!isSplit()) return null;
   const onOutput = !!(out && out.scene.W && out.scene.H);
@@ -581,7 +566,7 @@ function fitGoal() {
   return {
     where: onOutput ? '出力側' : 'プレビュー', wanted, lo, hi,
     reachable: wanted >= lo && wanted <= hi,
-    fits: Math.abs(wanted - cfg.fh) < FIT_TOLERANCE,
+    fits: Math.abs(wanted - cfg.fh) < FIT_TOLERANCE_PX,
   };
 }
 
@@ -602,11 +587,10 @@ function fitWindow() {
 }
 
 function toggleFull() {
-  full = !full;
+  showWholePage = !showWholePage;
   render();
 }
 
-// --- 字幕の枠を直接つかむ: 中=移動、角(赤)=拡大縮小、辺(青)=切り抜き ---
 gizmo.addEventListener('pointerdown', (e) => {
   // 並べる配置で掴めるのは切り抜きの辺だけ。枠の中を押しても動かせないので、調整中の扱い(出力側の枠線)にもしない
   if (isSplit() && !e.target.dataset.c) return;
@@ -631,7 +615,7 @@ gizmo.addEventListener('pointermove', (e) => {
     const { cw, ch } = cropSize(start);
     const scale = w / cw;
     // 重ねる配置では枠の幅に下限があり、それを割ると拡大率のほうが変わって掴んだ辺が付いてこなくなるので、その手前で止める
-    const minW = isSplit() ? MIN_PX : Math.max(MIN_PX, MIN_SUB_W * W / scale);
+    const minW = isSplit() ? MIN_PX : Math.max(MIN_PX, MIN_OVERLAY_WIDTH_RATIO * W / scale);
     let d;
     if (edge === 't') {
       d = clamp(dy / scale, -start.it, ch - MIN_PX);
@@ -658,7 +642,7 @@ gizmo.addEventListener('pointermove', (e) => {
     cfg.subY = (t + dy) / H;
   } else {
     // 縦横比は字幕の範囲で決まるので幅だけ動かし、掴んだ角の対角を固定する
-    const nw = clamp(handle.includes('w') ? w - dx : w + dx, W * MIN_SUB_W, W);
+    const nw = clamp(handle.includes('w') ? w - dx : w + dx, W * MIN_OVERLAY_WIDTH_RATIO, W);
     const nh = nw * h / w;
     cfg.subW = nw / W;
     cfg.subX = (handle.includes('w') ? l + w - nw : l) / W;
@@ -670,11 +654,9 @@ for (const ev of ['pointerup', 'pointercancel']) gizmo.addEventListener(ev, () =
   if (!grab) return;
   grab = null;
   markAdjusting(false);
-  // 離したら、新しい切り抜きで領域に収め直す
   layout();
 });
 
-// --- 並べる配置: スライドと字幕の境界線 ---
 const divider = $('divider');
 divider.addEventListener('pointerdown', (e) => {
   dividing = true;
@@ -698,7 +680,6 @@ for (const ev of ['pointerup', 'pointercancel']) divider.addEventListener(ev, ()
   layout();
 });
 
-// --- 操作 ---
 const actions = {
   loadUrl, pickSlide, openOutput, toggleFull, fitWindow,
   stopSlide: () => { setSlide(null); setStatus('スライドの共有を停止しました。'); },
@@ -733,7 +714,6 @@ window.addEventListener('pagehide', () => {
   if (out) out.win.close();
 });
 
-// --- 環境判定 ---
 if (!navigator.mediaDevices?.getDisplayMedia) {
   setStatus(window.isSecureContext
     ? 'このブラウザはスライドの取り込み(画面共有)に対応していません。デスクトップ版の Chrome / Edge を使ってください。'
