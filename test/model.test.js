@@ -7,6 +7,9 @@ import {
 
 const W = 1600, H = 900;
 const config = (over = {}) => ({ ...DEFAULTS, ...over });
+// 重ねる配置で、枠が (left, top) から幅 width で見えるような置き方(切り抜きなしの初期の窓 960×540 に対して)
+const overlayAt = (left, top, width) => ({ ovX: left / W, ovY: top / H, ovScale: width / 960 / W });
+const placement = (cfg) => [cfg.ovX, cfg.ovY, cfg.ovScale];
 const near = (actual, expected, message) => assert.ok(Math.abs(actual - expected) < 1e-6, `${message ?? ''} ${actual} ≠ ${expected}`);
 
 // 掴んだ時点の状態。枠の位置と大きさは、その時点の配置から求める
@@ -26,6 +29,11 @@ test('保存値のうち、知っている項目だけを引き継ぐ', () => {
   assert.deepEqual(Object.keys(cfg).sort(), Object.keys(DEFAULTS).sort());
 });
 
+test('画面の外へ飛んだ置き方の保存値は、初期の置き方に戻る', () => {
+  const cfg = load({ ovX: 40, ovY: 0.2, ovScale: 0.001 });
+  assert.deepEqual(placement(cfg), placement(DEFAULTS));
+});
+
 test('壊れた保存値は、その項目だけ初期値に戻る', () => {
   const cfg = load({ fw: 'wide', band: null, subOpacity: NaN, layout: 'toString', blend: 7, fh: 300 });
   assert.equal(cfg.fw, DEFAULTS.fw);
@@ -36,15 +44,27 @@ test('壊れた保存値は、その項目だけ初期値に戻る', () => {
   assert.equal(cfg.fh, 300);
 });
 
-test('重ねる配置では、スライドは全面のままで字幕は指定した位置と幅に出る', () => {
-  const cfg = config({ subX: 0.1, subY: 0.5, subW: 0.5 });
-  const p = place(cfg, W, H);
+test('重ねる配置では、スライドは全面のままで字幕は置いた位置と大きさに出る', () => {
+  const p = place(config(overlayAt(160, 450, 800)), W, H);
   assert.equal(p.slide, null);
   assert.equal(p.overlaid, true);
   near(p.box.left, 160);
   near(p.box.top, 450);
   near(p.box.width, 800);
   near(p.box.height, 800 * 540 / 960);
+});
+
+test('重ねる配置で窓の形を変えても、文字の大きさ(拡大率)と窓の位置は変わらない', () => {
+  const cfg = config(overlayAt(160, 450, 800));
+  const before = place(cfg, W, H);
+  cfg.fw = 480;
+  cfg.fh = 700;
+  normalize(cfg);
+  const after = place(cfg, W, H);
+  near(after.scale, before.scale, '拡大率');
+  near(after.box.left, before.box.left, '左辺');
+  near(after.box.top, before.box.top, '上辺');
+  near(after.box.width, before.box.width / 2, '枠の幅');
 });
 
 for (const [layout, slide, sub] of [
@@ -122,36 +142,66 @@ test('切り抜きの辺を大きく動かしても、反対側の切り抜き�
   near(cropSize(cfg).ch, MIN_PX);
 });
 
-test('重ねる配置で切り抜いても、中身の大きさと反対側の辺の位置は変わらない', () => {
-  const cfg = config({ subX: 0.2, subY: 0.3, subW: 0.5 });
+test('重ねる配置で切り抜いても、置き方は変わらず、掴んだ辺だけがマウスと同じだけ動く', () => {
+  const cfg = config(overlayAt(320, 270, 800));
   const before = place(cfg, W, H);
+  const placed = placement(cfg);
   dragCrop(cfg, grabOf(cfg, { edge: 'l' }), 80, 0);
   normalize(cfg);
   const after = place(cfg, W, H);
+  assert.deepEqual(placement(cfg), placed);
   near(after.scale, before.scale, '拡大率');
   near(after.box.left, before.box.left + 80, '左辺');
   near(after.box.left + after.box.width, before.box.left + before.box.width, '右辺');
 });
 
 test('重ねる配置の切り抜きは、枠が最小の幅になったところで止まる', () => {
-  const cfg = config({ subX: 0.3, subY: 0.3, subW: 0.2 });
-  const before = place(cfg, W, H);
+  const cfg = config(overlayAt(480, 270, 320));
   dragCrop(cfg, grabOf(cfg, { edge: 'l' }), 5000, 0);
   normalize(cfg);
+  near(place(cfg, W, H).box.width, W * MIN_OVERLAY_WIDTH_RATIO);
+});
+
+test('重ねる配置で切り抜きを戻すとき、枠は画面の端で止まり、置き方は変わらない', () => {
+  // 左を 480px 切った状態で、枠の左辺が画面の左端から 100px のところにある
+  const cfg = config({ ...overlayAt(-300, 270, 800), il: 480 });
+  const placed = placement(cfg);
+  near(place(cfg, W, H).box.left, 100);
+  dragCrop(cfg, grabOf(cfg, { edge: 'l' }), -5000, 0);
+  normalize(cfg);
+  near(place(cfg, W, H).box.left, 0);
+  assert.deepEqual(placement(cfg), placed);
+});
+
+test('字幕の枠を動かすと、マウスと同じだけ位置が変わり、大きさは変わらない', () => {
+  const cfg = config(overlayAt(400, 270, 800));
+  const before = place(cfg, W, H);
+  dragMove(cfg, grabOf(cfg), -80, 45);
   const after = place(cfg, W, H);
-  near(after.box.width, W * MIN_OVERLAY_WIDTH_RATIO);
+  near(after.box.left, before.box.left - 80);
+  near(after.box.top, before.box.top + 45);
   near(after.scale, before.scale, '拡大率');
 });
 
-test('字幕の枠を動かすと、マウスと同じだけ位置が変わる', () => {
-  const cfg = config({ subX: 0.25, subY: 0.3, subW: 0.5 });
-  dragMove(cfg, grabOf(cfg), -80, 45);
-  near(cfg.subX, 0.2);
-  near(cfg.subY, 0.35);
+test('字幕の枠は、動かしても画面の左右の外へは出ない', () => {
+  const cfg = config(overlayAt(400, 270, 800));
+  dragMove(cfg, grabOf(cfg), 5000, 0);
+  const { box } = place(cfg, W, H);
+  near(box.left + box.width, W);
+});
+
+test('切り抜いた字幕の枠を動かしても、切り抜きは変わらない', () => {
+  const cfg = config({ ...overlayAt(400, 270, 800), it: 118, il: 40 });
+  const before = place(cfg, W, H);
+  dragMove(cfg, grabOf(cfg), 30, -20);
+  const after = place(cfg, W, H);
+  assert.deepEqual([cfg.it, cfg.il, cfg.ir, cfg.ib], [118, 40, 0, 0]);
+  near(after.box.left, before.box.left + 30);
+  near(after.box.top, before.box.top - 20);
 });
 
 test('角を動かすと、対角を固定したまま縦横比を保って大きさが変わる', () => {
-  const cfg = config({ subX: 0.25, subY: 0.3, subW: 0.5 });
+  const cfg = config({ ...overlayAt(400, 270, 800), it: 118, il: 40 });
   const before = place(cfg, W, H).box;
   dragResize(cfg, grabOf(cfg, { handle: 'nw' }), -160);
   const after = place(cfg, W, H).box;

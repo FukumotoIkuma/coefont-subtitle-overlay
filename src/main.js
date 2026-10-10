@@ -114,6 +114,9 @@ function render() {
   for (const id of ['rowBand', 'btnFit']) $(id).hidden = !sp;
   for (const id of ['rowBlend', 'rowOpacity', 'btnResetPos']) $(id).hidden = !!sp;
   $('gizmoLabel').textContent = '字幕(実物は出力側に表示)';
+  $('winHint').textContent = sp
+    ? 'CoeFont を描く窓の形。幅を狭くするほど文字が大きく映り、高さを増やすほど行数が増える。'
+    : 'CoeFont を描く窓の形。文字の大きさは変わらず、枠の形と1行の文字数・行数が変わる(文字の大きさは赤い角で変える)。';
   $('gizmoHint').textContent = sp
     ? 'プレビュー: 赤い線をドラッグでスライドと字幕の境界。字幕の枠の青い辺で切り抜き(境界を動かしても切り抜きは変わらない)。'
     : 'プレビューの字幕の枠: 中をドラッグで移動、赤い角で拡大縮小、青い辺で切り抜き。';

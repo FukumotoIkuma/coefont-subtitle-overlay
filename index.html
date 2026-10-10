@@ -44,7 +44,7 @@
     <div class="row" id="rowOpacity"><label for="subOpacity">不透明度</label><input type="range" id="subOpacity" min="20" max="100"><output id="oOpacity"></output></div>
     <div class="row"><label for="winW">CoeFont の窓の幅</label><input type="range" id="winW" step="10"><output id="oWinW"></output></div>
     <div class="row"><label for="winH">CoeFont の窓の高さ</label><input type="range" id="winH" step="10"><output id="oWinH"></output></div>
-    <div class="hint">CoeFont を描く窓の形。幅を狭くするほど文字が大きく映り、高さを増やすほど行数が増える。</div>
+    <div class="hint" id="winHint"></div>
     <button data-act="fitWindow" id="btnFit">窓の形を字幕の領域に合わせる</button>
     <div class="hint" id="fitNote"></div>
     <div class="row"><button data-act="resetCrop">切り抜きを初期化</button><button data-act="resetWindow">窓の形を初期化</button><button data-act="resetPos" id="btnResetPos">配置を初期化</button></div>

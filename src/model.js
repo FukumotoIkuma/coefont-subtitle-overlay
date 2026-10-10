@@ -6,7 +6,10 @@
 // 窓の形と切り抜きの初期値は1つにまとめない。まとめると、切り抜きを初期化したときに窓の形まで戻ってしまう
 export const WINDOW_DEFAULTS = { fw: 960, fh: 540 };
 export const CROP_DEFAULTS = { it: 0, il: 0, ir: 0, ib: 0 };
-export const POS_DEFAULTS = { subX: 0.25, subY: 0.4, subW: 0.5 };
+// 重ねる配置での置き方は、見えている枠の位置と幅ではなく、窓の左上(ovX, ovY: 画面に対する割合)と
+// 拡大率(ovScale: 窓の1pxが画面幅の何割か)で持つ。枠で持つと、切り抜きや窓の形を変えるたびに枠が変わり、
+// 中身が動かないよう位置と幅を補正し続けなければならない
+export const POS_DEFAULTS = { ovX: 0.25, ovY: 0.4, ovScale: 0.5 / WINDOW_DEFAULTS.fw };
 export const DEFAULTS = { ...WINDOW_DEFAULTS, ...CROP_DEFAULTS, ...POS_DEFAULTS, subOpacity: 1, blend: 'normal', layout: 'overlay', band: 0.22 };
 
 // 配置ごとの分岐を選択肢・領域の計算・境界線・ドラッグの各所に書かない。書くと配置を足すたびに直し漏れが出るので、
@@ -24,6 +27,7 @@ export const WIN_W_RANGE = [300, 1600];
 export const WIN_H_RANGE = [60, 2000];
 export const MIN_PX = 40;
 export const MIN_OVERLAY_WIDTH_RATIO = 0.1;
+const OVERLAY_TOP_LIMIT = 0.98;
 export const FIT_TOLERANCE_PX = 1;
 
 export const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
@@ -51,6 +55,8 @@ export function load(stored) {
   c.ir = clamp(c.ir, 0, WIN_W_RANGE[1] - c.il - MIN_PX);
   c.it = clamp(c.it, 0, WIN_H_RANGE[1] - MIN_PX);
   c.ib = clamp(c.ib, 0, WIN_H_RANGE[1] - c.it - MIN_PX);
+  // 置き方は操作のたびには確かめない(確かめると切り抜きや窓の形の変更で位置が動く)ので、画面の外へ飛んだ保存値はここで戻す
+  if (!(c.ovScale > 0) || c.ovX < -1 || c.ovX > 1 || c.ovY < -1 || c.ovY > 1) Object.assign(c, POS_DEFAULTS);
   normalize(c);
   return c;
 }
@@ -59,9 +65,6 @@ export function normalize(cfg) {
   cfg.fw = clamp(cfg.fw, ...windowRange(cfg, 'fw'));
   cfg.fh = clamp(cfg.fh, ...windowRange(cfg, 'fh'));
   cfg.band = clamp(cfg.band, ...BAND_RANGE);
-  cfg.subW = clamp(cfg.subW, MIN_OVERLAY_WIDTH_RATIO, 1);
-  cfg.subX = clamp(cfg.subX, 0, 1 - cfg.subW);
-  cfg.subY = clamp(cfg.subY, 0, 0.98);
 }
 
 export function regions(cfg, W, H) {
@@ -106,8 +109,11 @@ export function place(cfg, W, H, { wholePage = false, anchor = cfg } = {}) {
       },
     };
   }
-  const width = cfg.subW * W, scale = width / cw;
-  return { scale, shift, slide: null, overlaid: true, box: { left: cfg.subX * W, top: cfg.subY * H, width, height: ch * scale } };
+  const scale = cfg.ovScale * W;
+  return {
+    scale, shift, slide: null, overlaid: true,
+    box: { left: cfg.ovX * W + cfg.il * scale, top: cfg.ovY * H + cfg.it * scale, width: cw * scale, height: ch * scale },
+  };
 }
 
 // 並べる配置で、切り抜いた残りが W×H の画面の字幕の領域と同じ縦横比になる窓の高さ(wanted)と、
@@ -120,52 +126,46 @@ export function fitGoal(cfg, W, H) {
   return { wanted, lo, hi, reachable: wanted >= lo && wanted <= hi, fits: Math.abs(wanted - cfg.fh) < FIT_TOLERANCE_PX };
 }
 
-// 以下のドラッグは、掴んだ時点の状態 grab = { start: 設定の写し, W, H: プレビューの大きさ, l, t, w, h: 枠の位置と大きさ }
+// 以下のドラッグは、掴んだ時点の状態 grab = { start: 設定の写し, W, H: プレビューの大きさ, l, t, w, h: 枠の位置と大きさ(px) }
 // と、そこからのマウスの移動量 (dx, dy) で設定を書き換える
 
-export function dragCrop(cfg, { edge, start, W, H, w }, dx, dy) {
+export function dragCrop(cfg, { edge, start, W, l, t, w }, dx, dy) {
   // 拡大率を変えず、つかんだ辺だけがマウスに付いてくるようにする。反対側の切り抜きを越えない範囲で止めるので、
   // 掴んでいない辺の切り抜きには影響しない
   const { cw, ch } = cropSize(start);
   const scale = w / cw;
+  // 重ねる配置では、枠が掴めないほど細くなる手前と、画面の外へはみ出す手前でも止める。
+  // 並べる配置の枠は領域に収め直されるので、この2つは要らない
   const overlaid = !splitOf(cfg);
-  // 重ねる配置では枠の幅に下限があり、それを割ると拡大率のほうが変わって掴んだ辺が付いてこなくなるので、その手前で止める
   const minW = overlaid ? Math.max(MIN_PX, MIN_OVERLAY_WIDTH_RATIO * W / scale) : MIN_PX;
-  let d;
-  if (edge === 't') {
-    d = clamp(dy / scale, -start.it, ch - MIN_PX);
-    cfg.it = start.it + d;
-  } else if (edge === 'b') {
-    d = clamp(dy / scale, -(ch - MIN_PX), start.ib);
-    cfg.ib = start.ib - d;
-  } else if (edge === 'l') {
-    d = clamp(dx / scale, -start.il, cw - minW);
-    cfg.il = start.il + d;
-  } else {
-    d = clamp(dx / scale, -(cw - minW), start.ir);
-    cfg.ir = start.ir - d;
-  }
-  // 重ねる配置は枠の位置と幅を設定として持っているので、中身と反対側の辺が動かないよう合わせて直す。
-  // 並べる配置は、掴んでいる間は掴んだ時点の切り抜きで収めたままにしてある(place の anchor)ので、切り抜きを変えるだけでよい
-  if (overlaid) {
-    if (edge === 't') cfg.subY = start.subY + d * scale / H;
-    else if (edge === 'l') { cfg.subX = start.subX + d * scale / W; cfg.subW = (cw - d) * scale / W; }
-    else if (edge === 'r') cfg.subW = (cw + d) * scale / W;
-  }
+  const room = overlaid
+    ? { t: t / scale, l: l / scale, r: (W - l - w) / scale }
+    : { t: Infinity, l: Infinity, r: Infinity };
+  if (edge === 't') cfg.it = start.it + clamp(dy / scale, -Math.min(start.it, room.t), ch - MIN_PX);
+  else if (edge === 'b') cfg.ib = start.ib - clamp(dy / scale, -(ch - MIN_PX), start.ib);
+  else if (edge === 'l') cfg.il = start.il + clamp(dx / scale, -Math.min(start.il, room.l), cw - minW);
+  else cfg.ir = start.ir - clamp(dx / scale, -(cw - minW), Math.min(start.ir, room.r));
 }
 
-export function dragMove(cfg, { W, H, l, t }, dx, dy) {
-  cfg.subX = (l + dx) / W;
-  cfg.subY = (t + dy) / H;
+// 枠の左上を (left, top)、幅を width にする置き方へ書き換える(画面の大きさ W×H でのpx)
+function setOverlayBox(cfg, { W, H }, left, top, width) {
+  const scale = width / cropSize(cfg).cw;
+  cfg.ovScale = scale / W;
+  cfg.ovX = (left - cfg.il * scale) / W;
+  cfg.ovY = (top - cfg.it * scale) / H;
 }
 
-export function dragResize(cfg, { handle, W, H, l, t, w, h }, dx) {
+export function dragMove(cfg, grab, dx, dy) {
+  const { W, H, l, t, w } = grab;
+  setOverlayBox(cfg, grab, clamp(l + dx, 0, W - w), clamp(t + dy, 0, H * OVERLAY_TOP_LIMIT), w);
+}
+
+export function dragResize(cfg, grab, dx) {
+  const { handle, W, l, t, w, h } = grab;
   // 縦横比は字幕の範囲で決まるので幅だけ動かし、掴んだ角の対角を固定する
   const nw = clamp(handle.includes('w') ? w - dx : w + dx, W * MIN_OVERLAY_WIDTH_RATIO, W);
   const nh = nw * h / w;
-  cfg.subW = nw / W;
-  cfg.subX = (handle.includes('w') ? l + w - nw : l) / W;
-  cfg.subY = (handle.includes('n') ? t + h - nh : t) / H;
+  setOverlayBox(cfg, grab, handle.includes('w') ? l + w - nw : l, handle.includes('n') ? t + h - nh : t, nw);
 }
 
 // 境界線を、プレビュー上の位置 (fx, fy: 左上を0、右下を1とする割合) へ動かす
