@@ -40,22 +40,14 @@
   .dot { width: 9px; height: 9px; border-radius: 50%; background: #555; flex: none; }
   .dot.on { background: #3fb950; }
 
-  #stage { position: relative; overflow: hidden; background: #000; border-radius: 6px; user-select: none; touch-action: none; aspect-ratio: 16 / 9; max-width: 1100px; }
-  #stage:fullscreen { border-radius: 0; max-width: none; cursor: none; }
-  #slideView { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-  #subBox { position: absolute; overflow: hidden; }
-  /* 表示の大きさでCoeFont側のレイアウトが変わると切り抜き位置がずれるので、iframeは固定サイズで描かせて拡大縮小だけする */
-  #frame { position: absolute; left: 0; top: 0; border: 0; background: #fff; transform-origin: 0 0; }
-  #cropLayer { position: absolute; inset: 0; overflow: hidden; cursor: crosshair; }
-  /* 選択範囲外を暗くするのに巨大なbox-shadowを使う(親のoverflow:hiddenで切る) */
-  #sel { position: absolute; border: 2px solid #2f6feb; box-shadow: 0 0 0 9999px rgba(0, 0, 0, .55); pointer-events: none; }
+  #stage { border-radius: 6px; aspect-ratio: 16 / 9; max-width: 1100px; }
   #gizmo { position: absolute; border: 2px solid #e5484d; cursor: move; display: none; }
   #gizmo i { position: absolute; width: 12px; height: 12px; background: #e5484d; }
   #gizmo i[data-h=nw] { left: -7px; top: -7px; cursor: nwse-resize; }
   #gizmo i[data-h=se] { right: -7px; bottom: -7px; cursor: nwse-resize; }
   #gizmo i[data-h=ne] { right: -7px; top: -7px; cursor: nesw-resize; }
   #gizmo i[data-h=sw] { left: -7px; bottom: -7px; cursor: nesw-resize; }
-  #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 12px; color: #999; pointer-events: none; }
+  #note { position: absolute; left: 0; right: 0; top: 0; padding: 10px; text-align: center; color: #999; pointer-events: none; }
 
   #foot { margin-top: 10px; display: flex; justify-content: space-between; gap: 12px; }
 </style>
@@ -74,13 +66,8 @@
 </div>
 
 <div id="stage">
-  <video id="slideView" muted playsinline autoplay></video>
-  <div id="subBox">
-    <iframe id="frame" allow="autoplay; microphone; clipboard-write" title="CoeFont"></iframe>
-    <div id="cropLayer"><div id="sel"></div></div>
-  </div>
   <div id="gizmo"><i data-h="nw"></i><i data-h="ne"></i><i data-h="sw"></i><i data-h="se"></i></div>
-  <div id="empty"></div>
+  <div id="note"></div>
 </div>
 
 <div class="docks">
@@ -107,8 +94,9 @@
 
   <div class="dock">
     <h2>出力</h2>
-    <button class="big primary" data-act="fullscreen">全画面で出力</button>
-    <div class="hint">このブラウザのウィンドウを聴衆側ディスプレイへ移してから押す。スライドショーの上にかぶさる。Esc で戻る。</div>
+    <div class="row"><span class="dot" id="dotOut"></span><span class="name" id="outState"></span></div>
+    <button class="big primary" data-act="openOutput" id="btnOut">出力ウィンドウを開く</button>
+    <div class="hint">開いた窓を聴衆側ディスプレイへ移し、窓の中の「全画面にする」を押す。位置・範囲・透過は、全画面中もこの画面から調整できる。</div>
   </div>
 </div>
 
@@ -128,32 +116,49 @@ const BLENDS = ['normal', 'multiply', 'screen'];
 const FRAME_W = 1280, FRAME_H = 720;
 const MIN = 0.02;
 const MODE_HINTS = {
-  compose: '聴衆に見える画面。赤枠をドラッグで移動、角で拡大縮小',
-  crop: 'ドラッグで字幕の範囲を囲む',
-  interact: 'CoeFont の画面をそのまま操作できる(参加、言語の切り替えなど)',
+  compose: '赤枠=字幕の位置。ドラッグで移動、角で拡大縮小。出力ウィンドウにすぐ反映される',
+  crop: 'ドラッグで字幕の範囲を囲む(出力ウィンドウ側は CoeFont の画面全体に切り替わる)',
+  interact: '出力ウィンドウ側で CoeFont をそのまま操作できる(参加、言語の切り替えなど)',
 };
+// 手元のプレビューと出力ウィンドウは別文書なので、同じ見た目の定義を両方へ差し込む
+const SCENE_CSS = `
+  .scene { position: relative; overflow: hidden; background: #000; user-select: none; touch-action: none; }
+  .scene .slide { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .scene .sub { position: absolute; overflow: hidden; }
+  .scene .content { position: absolute; left: 0; top: 0; border: 0; background: #fff; transform-origin: 0 0; }
+  .scene .ph { background: repeating-linear-gradient(45deg, #cfd6e4 0 24px, #e9edf5 24px 48px); opacity: .8; }
+  .scene .crop { position: absolute; inset: 0; overflow: hidden; cursor: crosshair; }
+  .scene .sel { position: absolute; border: 2px solid #2f6feb; box-shadow: 0 0 0 9999px rgba(0, 0, 0, .55); pointer-events: none; }
+`;
+const OUTPUT_CSS = `
+  html, body { margin: 0; height: 100%; background: #000; }
+  #root { position: absolute; inset: 0; }
+  #bar { position: absolute; left: 0; right: 0; top: 0; padding: 8px; display: flex; gap: 12px; align-items: center; justify-content: center;
+         font: 14px system-ui, sans-serif; color: #fff; background: rgba(0, 0, 0, .75); }
+  #bar button { font: inherit; padding: 6px 14px; border-radius: 5px; border: 0; background: #2f6feb; color: #fff; cursor: pointer; }
+`;
 
 let cfg = { ...DEFAULTS };
 try { Object.assign(cfg, JSON.parse(localStorage.getItem(STORE_KEY) || '{}')); } catch {}
 
 let mode = 'compose';
-let loaded = false;
+let url = null;
 let slideStream = null;
+let out = null; // 出力ウィンドウ { win, scene }
 
 const stage = $('stage');
-const slideView = $('slideView');
-const subBox = $('subBox');
-const frame = $('frame');
-const cropLayer = $('cropLayer');
 const gizmo = $('gizmo');
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
-
-frame.style.width = FRAME_W + 'px';
-frame.style.height = FRAME_H + 'px';
 
 function setStatus(text, kind = '') {
   $('status').textContent = text;
   $('status').className = kind;
+}
+
+function addStyle(doc, css) {
+  const style = doc.createElement('style');
+  style.textContent = css;
+  doc.head.append(style);
 }
 
 function normalize() {
@@ -167,13 +172,44 @@ function normalize() {
   if (!BLENDS.includes(cfg.blend)) cfg.blend = DEFAULTS.blend;
 }
 
-function layout() {
-  const W = stage.clientWidth, H = stage.clientHeight;
+// --- スライド+字幕の合成画面 ---
+// 出力ウィンドウ(real)にはCoeFontのiframeを置く。手元のプレビューに同じiframeを置くと二重に参加して
+// 音声も二重になるので、手元は同じ寸法の代用の板で位置と範囲だけを示す
+function makeScene(doc, root, real) {
+  root.classList.add('scene');
+  const slide = doc.createElement('video');
+  slide.className = 'slide';
+  slide.muted = true;
+  slide.playsInline = true;
+  slide.autoplay = true;
+  const sub = doc.createElement('div');
+  sub.className = 'sub';
+  const content = doc.createElement(real ? 'iframe' : 'div');
+  content.className = real ? 'content' : 'content ph';
+  if (real) {
+    content.allow = 'autoplay; microphone; clipboard-write';
+    content.title = 'CoeFont';
+  }
+  // 表示の大きさでCoeFont側のレイアウトが変わると切り抜き位置がずれるので、固定サイズで描かせて拡大縮小だけする
+  content.style.width = FRAME_W + 'px';
+  content.style.height = FRAME_H + 'px';
+  const crop = doc.createElement('div');
+  crop.className = 'crop';
+  const sel = doc.createElement('div');
+  sel.className = 'sel';
+  crop.append(sel);
+  sub.append(content, crop);
+  root.prepend(slide, sub);
+  bindCropDrag(crop);
+  for (const ev of ['loadedmetadata', 'resize', 'emptied']) slide.addEventListener(ev, layout);
+  return { doc, root, slide, sub, content, crop, sel, real };
+}
+
+function layoutScene(sc) {
+  const W = sc.root.clientWidth, H = sc.root.clientHeight;
   const composing = mode === 'compose';
-  // スライドショーは聴衆側ディスプレイを全面で覆うので、縦横比をスライドに合わせれば全画面時と配置が一致する
-  stage.style.aspectRatio = slideView.videoWidth ? `${slideView.videoWidth} / ${slideView.videoHeight}` : '';
-  slideView.style.visibility = composing ? '' : 'hidden';
-  subBox.style.display = loaded ? '' : 'none';
+  sc.slide.style.visibility = composing ? '' : 'hidden';
+  sc.sub.style.display = url ? '' : 'none';
 
   let scale, box, shift = [0, 0];
   if (composing) {
@@ -186,29 +222,38 @@ function layout() {
     scale = Math.min(W / FRAME_W, H / FRAME_H);
     box = { left: (W - FRAME_W * scale) / 2, top: (H - FRAME_H * scale) / 2, width: FRAME_W * scale, height: FRAME_H * scale };
   }
-  for (const k in box) subBox.style[k] = gizmo.style[k] = box[k] + 'px';
-  frame.style.transform = `scale(${scale}) translate(${shift[0]}px, ${shift[1]}px)`;
-  frame.style.pointerEvents = mode === 'interact' ? 'auto' : 'none';
-  subBox.style.mixBlendMode = composing ? cfg.blend : 'normal';
-  subBox.style.opacity = composing ? cfg.subOpacity : 1;
-  cropLayer.style.display = mode === 'crop' ? '' : 'none';
-  // 操作用の赤枠は聴衆に見せない
-  gizmo.style.display = composing && loaded && !document.fullscreenElement ? 'block' : 'none';
+  for (const k in box) sc.sub.style[k] = box[k] + 'px';
+  sc.content.style.transform = `scale(${scale}) translate(${shift[0]}px, ${shift[1]}px)`;
+  sc.crop.style.display = mode === 'crop' ? '' : 'none';
+  sc.sel.style.left = cfg.x * 100 + '%';
+  sc.sel.style.top = cfg.y * 100 + '%';
+  sc.sel.style.width = cfg.w * 100 + '%';
+  sc.sel.style.height = cfg.h * 100 + '%';
+  if (sc.real) {
+    sc.content.style.pointerEvents = mode === 'interact' ? 'auto' : 'none';
+    sc.sub.style.mixBlendMode = composing ? cfg.blend : 'normal';
+    sc.sub.style.opacity = composing ? cfg.subOpacity : 1;
+    // 全画面で字幕を出している間はカーソルを聴衆に見せない
+    sc.root.style.cursor = sc.doc.fullscreenElement && composing ? 'none' : '';
+  }
+  return box;
+}
 
-  const sel = $('sel');
-  sel.style.left = cfg.x * 100 + '%';
-  sel.style.top = cfg.y * 100 + '%';
-  sel.style.width = cfg.w * 100 + '%';
-  sel.style.height = cfg.h * 100 + '%';
+const ctl = makeScene(document, stage, false);
+addStyle(document, SCENE_CSS);
 
-  $('empty').textContent = document.fullscreenElement ? ''
-    : !loaded ? '「ソース」に CoeFont の招待URLを貼って読み込む'
-    : composing && !slideStream ? 'スライド未選択(聴衆には黒い背景に字幕だけが見える)' : '';
-  $('empty').style.alignItems = loaded ? 'flex-start' : 'center';
+function layout() {
+  // スライドショーは聴衆側ディスプレイを全面で覆うので、縦横比をスライドに合わせれば出力と配置が一致する
+  stage.style.aspectRatio = ctl.slide.videoWidth ? `${ctl.slide.videoWidth} / ${ctl.slide.videoHeight}` : '';
+  const box = layoutScene(ctl);
+  gizmo.style.display = mode === 'compose' && url ? 'block' : 'none';
+  for (const k in box) gizmo.style[k] = box[k] + 'px';
+  if (out) layoutScene(out.scene);
+  $('note').textContent = !url ? '「ソース」に CoeFont の招待URLを貼って読み込む'
+    : mode === 'interact' ? '出力ウィンドウ側で CoeFont を操作してください'
+    : mode === 'compose' && !slideStream ? 'スライド未選択(聴衆には黒い背景に字幕だけが見える)' : '';
 }
 new ResizeObserver(layout).observe(stage);
-for (const ev of ['loadedmetadata', 'resize', 'emptied']) slideView.addEventListener(ev, layout);
-document.addEventListener('fullscreenchange', layout);
 
 function render() {
   normalize();
@@ -217,8 +262,11 @@ function render() {
   $('oOpacity').textContent = Math.round(cfg.subOpacity * 100) + '%';
   for (const b of $('modes').children) b.classList.toggle('on', b.dataset.mode === mode);
   $('modeHint').textContent = MODE_HINTS[mode];
-  $('dotSub').classList.toggle('on', loaded);
+  $('dotSub').classList.toggle('on', !!url);
   $('dotSlide').classList.toggle('on', !!slideStream);
+  $('dotOut').classList.toggle('on', !!out);
+  $('outState').textContent = out ? '出力ウィンドウ: 表示中' : '出力ウィンドウ: 未表示';
+  $('btnOut').textContent = out ? '出力ウィンドウを前面に出す' : '出力ウィンドウを開く';
   $('btnSlide').textContent = slideStream ? '変更' : '選択';
   $('stopSlide').disabled = !slideStream;
   layout();
@@ -230,9 +278,59 @@ function setMode(m) {
   render();
 }
 
+function attach(video, s) {
+  video.srcObject = s;
+  if (s) video.play().catch(() => {});
+}
+
+// --- 出力ウィンドウ ---
+function openOutput() {
+  if (out && !out.win.closed) {
+    out.win.focus();
+    return out;
+  }
+  const win = window.open('', 'coefont-output', 'popup,width=960,height=540');
+  if (!win) {
+    setStatus('出力ウィンドウがブロックされました。アドレスバーの表示からこのサイトのポップアップを許可してください。', 'error');
+    return null;
+  }
+  const doc = win.document;
+  doc.title = '字幕出力';
+  doc.head.innerHTML = '';
+  doc.body.innerHTML = '';
+  addStyle(doc, SCENE_CSS + OUTPUT_CSS);
+  const root = doc.createElement('div');
+  root.id = 'root';
+  const bar = doc.createElement('div');
+  bar.id = 'bar';
+  const go = doc.createElement('button');
+  go.textContent = '全画面にする';
+  bar.append('この窓を聴衆側ディスプレイへ移動してから →', go, '(Esc で解除)');
+  doc.body.append(root, bar);
+
+  const self = { win, scene: makeScene(doc, root, true) };
+  out = self;
+  if (url) self.scene.content.src = url;
+  attach(self.scene.slide, slideStream);
+  go.addEventListener('click', () => doc.documentElement.requestFullscreen().catch(() => {}));
+  doc.addEventListener('fullscreenchange', () => {
+    bar.style.display = doc.fullscreenElement ? 'none' : '';
+    layout();
+  });
+  win.addEventListener('resize', layout);
+  win.addEventListener('pagehide', () => {
+    if (out !== self) return;
+    out = null;
+    render();
+    setStatus('出力ウィンドウが閉じられました。「出力ウィンドウを開く」で開き直せます(CoeFont は読み込み直しになります)。', 'warn');
+  });
+  render();
+  return self;
+}
+
 // --- ソース ---
 // CoeFontはタブ共有で取り込まず、ページそのものを埋め込む。タブ共有を使うと、共有中はChromeが
-// 同じプロファイルの全タブ(全画面の出力先を含む)に「共有しています」バーを出し、ページ側から消せないため
+// 同じプロファイルの全タブ(出力ウィンドウを含む)に「共有しています」バーを出し、ページ側から消せないため
 function loadUrl() {
   let u;
   try { u = new URL($('url').value.trim()); } catch {}
@@ -240,18 +338,20 @@ function loadUrl() {
     setStatus('CoeFont の招待URL(https://〜)を貼ってください。', 'warn');
     return;
   }
-  frame.src = u.href;
-  loaded = true;
-  try { sessionStorage.setItem(URL_KEY, u.href); } catch {}
+  url = u.href;
+  try { sessionStorage.setItem(URL_KEY, url); } catch {}
+  const o = openOutput();
+  if (!o) return;
+  o.scene.content.src = url;
   setMode('interact');
-  setStatus('CoeFont を読み込みました。必要ならこの画面で参加操作をしてから、「字幕の範囲」で字幕を囲んでください。\n別のタブでも同じ招待URLを開いていると音声が二重に鳴るので、そちらは閉じてください。');
+  setStatus('出力ウィンドウに CoeFont を開きました。必要ならそちらで参加操作をしてから、「字幕の範囲」で字幕を囲んでください。\n別のタブでも同じ招待URLを開いていると音声が二重に鳴るので、そちらは閉じてください。');
 }
 
 function setSlide(s) {
   if (slideStream) slideStream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
   slideStream = s;
-  slideView.srcObject = s;
-  if (s) slideView.play().catch(() => {});
+  attach(ctl.slide, s);
+  if (out) attach(out.scene.slide, s);
   render();
 }
 
@@ -262,7 +362,7 @@ async function pickSlide() {
       video: { displaySurface: 'window', frameRate: { ideal: 30 } },
       audio: false,
       selfBrowserSurface: 'exclude',
-      // 画面全体を選ぶと、全画面出力した自分自身が映り込んで合わせ鏡になる
+      // 画面全体を選ぶと、全画面にした出力ウィンドウ自身が映り込んで合わせ鏡になる
       monitorTypeSurfaces: 'exclude',
     });
   } catch (e) {
@@ -281,45 +381,38 @@ async function pickSlide() {
   };
   const surface = track.getSettings().displaySurface;
   if (surface === 'browser') {
-    setStatus('タブが選ばれています。タブを共有すると Chrome の「共有しています」バーが全画面出力にも出ます。選択画面の「ウィンドウ」からスライドショーを選び直してください。', 'warn');
+    setStatus('タブが選ばれています。タブを共有すると Chrome の「共有しています」バーが出力ウィンドウにも出ます。選択画面の「ウィンドウ」からスライドショーを選び直してください。', 'warn');
   } else if (surface === 'monitor') {
-    setStatus('画面全体が選ばれています。全画面出力と同じディスプレイだと合わせ鏡になるので、スライドショーの「ウィンドウ」を選び直してください。', 'warn');
+    setStatus('画面全体が選ばれています。出力ウィンドウと同じディスプレイだと合わせ鏡になるので、スライドショーの「ウィンドウ」を選び直してください。', 'warn');
   } else {
-    setStatus('スライドを取得中。「配置」で字幕の位置を決め、このウィンドウを聴衆側ディスプレイへ移して「全画面で出力」を押してください。');
+    setStatus('スライドを取得中。「配置」で字幕の位置を決めてください。');
   }
 }
 
-async function fullscreen() {
-  setMode('compose');
-  try {
-    await stage.requestFullscreen();
-  } catch (e) {
-    setStatus(`全画面にできませんでした: ${e.name}: ${e.message}`, 'error');
-  }
+// --- 字幕の範囲: ドラッグで囲む(手元のプレビューでも出力ウィンドウでも同じ操作) ---
+function bindCropDrag(layer) {
+  let start = null;
+  const fracAt = (e) => {
+    const r = layer.getBoundingClientRect();
+    return { x: clamp((e.clientX - r.left) / r.width, 0, 1), y: clamp((e.clientY - r.top) / r.height, 0, 1) };
+  };
+  layer.addEventListener('pointerdown', (e) => {
+    start = fracAt(e);
+    layer.setPointerCapture(e.pointerId);
+  });
+  layer.addEventListener('pointermove', (e) => {
+    if (!start) return;
+    const p = fracAt(e);
+    // クリックだけで極小の範囲になるのを避ける
+    if (Math.abs(p.x - start.x) < MIN || Math.abs(p.y - start.y) < MIN) return;
+    cfg.x = Math.min(p.x, start.x);
+    cfg.y = Math.min(p.y, start.y);
+    cfg.w = Math.abs(p.x - start.x);
+    cfg.h = Math.abs(p.y - start.y);
+    render();
+  });
+  for (const ev of ['pointerup', 'pointercancel']) layer.addEventListener(ev, () => { start = null; });
 }
-
-// --- 字幕の範囲: ドラッグで囲む ---
-let cropStart = null;
-const fracIn = (el, e) => {
-  const r = el.getBoundingClientRect();
-  return { x: clamp((e.clientX - r.left) / r.width, 0, 1), y: clamp((e.clientY - r.top) / r.height, 0, 1) };
-};
-cropLayer.addEventListener('pointerdown', (e) => {
-  cropStart = fracIn(cropLayer, e);
-  cropLayer.setPointerCapture(e.pointerId);
-});
-cropLayer.addEventListener('pointermove', (e) => {
-  if (!cropStart) return;
-  const p = fracIn(cropLayer, e);
-  // クリックだけで極小の範囲になるのを避ける
-  if (Math.abs(p.x - cropStart.x) < MIN || Math.abs(p.y - cropStart.y) < MIN) return;
-  cfg.x = Math.min(p.x, cropStart.x);
-  cfg.y = Math.min(p.y, cropStart.y);
-  cfg.w = Math.abs(p.x - cropStart.x);
-  cfg.h = Math.abs(p.y - cropStart.y);
-  render();
-});
-for (const ev of ['pointerup', 'pointercancel']) cropLayer.addEventListener(ev, () => { cropStart = null; });
 
 // --- 配置: 字幕の移動と拡大縮小 ---
 let grab = null;
@@ -353,7 +446,7 @@ for (const ev of ['pointerup', 'pointercancel']) gizmo.addEventListener(ev, () =
 
 // --- 操作 ---
 const actions = {
-  loadUrl, pickSlide, fullscreen,
+  loadUrl, pickSlide, openOutput,
   stopSlide: () => { setSlide(null); setStatus('スライドの共有を停止しました。'); },
   resetCrop: () => { Object.assign(cfg, CROP_DEFAULTS); render(); },
   resetPos: () => { Object.assign(cfg, POS_DEFAULTS); render(); },
@@ -367,6 +460,8 @@ document.addEventListener('click', (e) => {
 $('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadUrl(); });
 $('blend').addEventListener('change', (e) => { cfg.blend = e.target.value; render(); });
 $('subOpacity').addEventListener('input', (e) => { cfg.subOpacity = e.target.value / 100; render(); });
+// このタブを閉じると出力ウィンドウを操作できなくなるので道連れにする
+window.addEventListener('pagehide', () => { if (out) out.win.close(); });
 
 // --- 環境判定 ---
 if (!navigator.mediaDevices?.getDisplayMedia) {
@@ -375,7 +470,7 @@ if (!navigator.mediaDevices?.getDisplayMedia) {
     : 'このページは HTTPS(または localhost)で開く必要があります。', 'error');
   $('btnSlide').disabled = true;
 } else {
-  setStatus('① CoeFont の招待URLを読み込む → ② 「字幕の範囲」で字幕を囲む → ③ スライドショーのウィンドウを選択 → ④ 聴衆側ディスプレイで「全画面で出力」');
+  setStatus('① CoeFont の招待URLを読み込む(出力ウィンドウが開く) → ② 「字幕の範囲」で字幕を囲む → ③ スライドショーのウィンドウを選択 → ④ 出力ウィンドウを聴衆側ディスプレイで全画面にする');
 }
 
 // 再読み込みで貼り直さずに済むよう、タブを閉じるまでだけURLを覚えておく(招待URLを長く残さない)
