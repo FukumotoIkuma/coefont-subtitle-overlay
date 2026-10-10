@@ -53,6 +53,7 @@
   #gizmo i[data-h=sw] { left: -7px; bottom: -7px; cursor: nesw-resize; }
 
   /* display:noneだと動画PiPの元として再生されないことがあるので見えない大きさで置く */
+  #build { margin-top: 10px; text-align: right; }
   #pipVideo { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 </style>
 </head>
@@ -116,6 +117,7 @@
 </div>
 
 <video id="pipVideo" muted playsinline autoplay></video>
+<div class="hint" id="build"></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -535,6 +537,9 @@ if (!window.isSecureContext) {
   setStatus(IDLE_STATUS);
 }
 if (!hasFrameless) $('frameless').disabled = true;
+
+// 配信側が10分キャッシュするので、古い版を見ていないか利用者が確かめられるようにする
+$('build').textContent = '配信日時: ' + document.lastModified;
 
 render();
 updateUI();
