@@ -91,10 +91,6 @@
     <h2>レイアウトと字幕</h2>
     <div class="row"><label for="layoutSel">配置</label>
       <select id="layoutSel">
-        <option value="overlay">スライドに重ねる</option>
-        <option value="below">スライドの下に並べる</option>
-        <option value="right">スライドの右に並べる</option>
-        <option value="left">スライドの左に並べる</option>
       </select></div>
     <div class="row" id="rowBand"><label for="band" id="bandLabel"></label><input type="range" id="band" min="8" max="60" step="0.5"><output id="oBand"></output></div>
     <div class="row" id="rowBlend"><label for="blend">背景の透過</label>
@@ -108,7 +104,8 @@
     <div class="row"><label for="winH">CoeFont の窓の高さ</label><input type="range" id="winH" step="10"><output id="oWinH"></output></div>
     <div class="hint">CoeFont を描く窓の形。幅を狭くするほど文字が大きく映り、高さを増やすほど行数が増える。</div>
     <button data-act="fitWindow" id="btnFit">窓の形を字幕の領域に合わせる</button>
-    <div class="row"><button data-act="resetCrop">切り抜きを初期化</button><button data-act="resetPos" id="btnResetPos">配置を初期化</button></div>
+    <div class="hint" id="fitNote"></div>
+    <div class="row"><button data-act="resetCrop">切り抜きを初期化</button><button data-act="resetWindow">窓の形を初期化</button><button data-act="resetPos" id="btnResetPos">配置を初期化</button></div>
     <div class="hint" id="gizmoHint"></div>
   </div>
 
@@ -133,16 +130,19 @@ const URL_KEY = 'coefont-subtitle-overlay:url';
 // 初期状態では切り抜かない。どこを見せるかは利用者が決めるもので、最初から操作部を切り落とすと
 // CoeFont側の設定(文字サイズ、Single/All、言語)に触れなくなる。
 // 切り抜きは割合ではなく四辺からの余白(px)で持つ。こうすると描く大きさを変えても切った位置がずれない
-const CROP_DEFAULTS = { fw: 960, fh: 540, it: 0, il: 0, ir: 0, ib: 0 };
+// 窓の形と切り抜きは別々の設定なので、初期値も初期化も分けておく
+const WINDOW_DEFAULTS = { fw: 960, fh: 540 };
+const CROP_DEFAULTS = { it: 0, il: 0, ir: 0, ib: 0 };
 const POS_DEFAULTS = { subX: 0.25, subY: 0.4, subW: 0.5 };
 // band: 並べる配置で字幕の領域が占める割合(下なら高さ、左右なら幅)。境界の位置だけを表し、CoeFontの切り抜きとは無関係
-const DEFAULTS = { ...CROP_DEFAULTS, ...POS_DEFAULTS, subOpacity: 1, blend: 'normal', layout: 'overlay', band: 0.22 };
+const DEFAULTS = { ...WINDOW_DEFAULTS, ...CROP_DEFAULTS, ...POS_DEFAULTS, subOpacity: 1, blend: 'normal', layout: 'overlay', band: 0.22 };
 // 並べる配置の定義。axis: 境界線が区切る向き(x=左右, y=上下)、subFirst: 字幕の領域が先(左/上)に来るか。
-// 領域の計算も境界線の向きもドラッグもここから導くので、配置を増やすときはここに1行足せば足りる
+// 選択肢・領域の計算・境界線の向き・ドラッグをすべてここから導くので、画面側は配置を増やすときここに1行足せば足りる
+const OVERLAY_LABEL = 'スライドに重ねる';
 const SPLITS = {
-  below: { axis: 'y', subFirst: false },
-  right: { axis: 'x', subFirst: false },
-  left: { axis: 'x', subFirst: true },
+  below: { label: 'スライドの下に並べる', axis: 'y', subFirst: false },
+  right: { label: 'スライドの右に並べる', axis: 'x', subFirst: false },
+  left: { label: 'スライドの左に並べる', axis: 'x', subFirst: true },
 };
 const LAYOUTS = ['overlay', ...Object.keys(SPLITS)];
 const RECT_KEYS = ['left', 'top', 'width', 'height'];
@@ -153,10 +153,13 @@ const BLENDS = ['normal', 'multiply', 'screen'];
 const WIN_W_RANGE = [300, 1600];
 const WIN_H_RANGE = [60, 2000];
 const WINDOW_SLIDERS = [
-  { input: 'winW', output: 'oWinW', key: 'fw', range: WIN_W_RANGE },
-  { input: 'winH', output: 'oWinH', key: 'fh', range: WIN_H_RANGE },
+  { input: 'winW', output: 'oWinW', key: 'fw', range: WIN_W_RANGE, name: '幅' },
+  { input: 'winH', output: 'oWinH', key: 'fh', range: WIN_H_RANGE, name: '高さ' },
 ];
 const MIN_PX = 40;
+// 重ねる配置で字幕の枠が取れる最小の幅(画面幅に対する割合)
+const MIN_SUB_W = 0.1;
+const NUMERIC_KEYS = Object.keys(DEFAULTS).filter((k) => typeof DEFAULTS[k] === 'number');
 // 手元のプレビューと出力ウィンドウは別文書なので、同じ見た目の定義を両方へ差し込む
 const SCENE_CSS = `
   .scene { position: relative; overflow: hidden; background: #000; user-select: none; touch-action: none; }
@@ -193,7 +196,9 @@ let out = null; // 出力ウィンドウ { win, scene }
 const stage = $('stage');
 const gizmo = $('gizmo');
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
-const isSplit = () => cfg.layout in SPLITS;
+// 継承されたプロパティ名(toString など)を配置と見なさないよう、自前のキーだけを引く
+const currentSplit = () => (Object.hasOwn(SPLITS, cfg.layout) ? SPLITS[cfg.layout] : null);
+const isSplit = () => !!currentSplit();
 
 function setStatus(text, kind = '') {
   $('status').textContent = text;
@@ -207,7 +212,9 @@ function addStyle(doc, css) {
 }
 
 function normalize() {
-  for (const k of ['il', 'ir', 'it', 'ib']) cfg[k] = Math.max(0, +cfg[k] || 0);
+  // 保存値に数値以外が紛れていると NaN が計算全体に広がって何も表示されなくなるので、数値の設定はすべて初期値へ戻す
+  for (const k of NUMERIC_KEYS) if (typeof cfg[k] !== 'number' || !Number.isFinite(cfg[k])) cfg[k] = DEFAULTS[k];
+  for (const k of Object.keys(CROP_DEFAULTS)) cfg[k] = Math.max(0, cfg[k]);
   // 窓を縮めても切り抜きは変えない。切り抜きを詰めて合わせると、窓を戻しても切った位置が元に戻らないので、
   // 切り抜きが収まらなくなる大きさには窓のほうを縮めさせない
   cfg.fw = clamp(Math.max(cfg.fw, cfg.il + cfg.ir + MIN_PX), ...WIN_W_RANGE);
@@ -219,7 +226,7 @@ function normalize() {
   cfg.ib = clamp(cfg.ib, 0, cfg.fh - cfg.it - MIN_PX);
   if (!LAYOUTS.includes(cfg.layout)) cfg.layout = DEFAULTS.layout;
   cfg.band = clamp(cfg.band, ...BAND_RANGE);
-  cfg.subW = clamp(cfg.subW, 0.1, 1);
+  cfg.subW = clamp(cfg.subW, MIN_SUB_W, 1);
   cfg.subX = clamp(cfg.subX, 0, 1 - cfg.subW);
   cfg.subY = clamp(cfg.subY, 0, 0.98);
   if (!BLENDS.includes(cfg.blend)) cfg.blend = DEFAULTS.blend;
@@ -262,7 +269,7 @@ function makeScene(doc, root, real) {
 
 // 並べる配置での、スライドの領域と字幕の領域。重ねる配置では分けないので null
 function regions(W, H) {
-  const sp = SPLITS[cfg.layout];
+  const sp = currentSplit();
   if (!sp) return null;
   const horizontal = sp.axis === 'x';
   const total = horizontal ? W : H;
@@ -293,6 +300,8 @@ function layoutScene(sc) {
   for (const k of RECT_KEYS) sc.slide.style[k] = split ? split.slide[k] + 'px' : '';
 
   let scale, box, shift = [0, 0];
+  // 控えた位置は掴んだ時点の画面の大きさでの値なので、途中で大きさが変わったら捨てて収め直す
+  if (sc.frozen && (sc.frozen.W !== W || sc.frozen.H !== H)) sc.frozen = null;
   if (split && sc.frozen) {
     // 切り抜きの辺を掴んでいる間は収め直さない。毎回収め直すと枠全体が動いて、掴んだ辺がマウスに付いてこなくなる
     scale = sc.frozen.scale;
@@ -314,7 +323,7 @@ function layoutScene(sc) {
     scale = Math.min(W / cfg.fw, H / fh);
     box = { left: (W - cfg.fw * scale) / 2, top: (H - fh * scale) / 2, width: cfg.fw * scale, height: fh * scale };
   }
-  sc.origin = { scale, left: box.left + shift[0] * scale, top: box.top + shift[1] * scale };
+  sc.origin = { scale, left: box.left + shift[0] * scale, top: box.top + shift[1] * scale, W, H };
   for (const k in box) sc.sub.style[k] = sc.outline.style[k] = box[k] + 'px';
   sc.outline.style.display = sc.real && adjusting && composing && url ? '' : 'none';
   sc.content.style.transform = `scale(${scale}) translate(${shift[0]}px, ${shift[1]}px)`;
@@ -349,7 +358,7 @@ function layout() {
   stage.style.maxWidth = `min(1100px, ${55 * ratio}vh)`;
   const box = layoutScene(ctl);
   gizmo.style.display = url ? 'block' : 'none';
-  const sp = SPLITS[cfg.layout];
+  const sp = currentSplit();
   gizmo.classList.toggle('split', !!sp);
   const div = $('divider');
   div.hidden = !sp;
@@ -361,6 +370,11 @@ function layout() {
   }
   for (const k in box) gizmo.style[k] = box[k] + 'px';
   if (out) layoutScene(out.scene);
+  // 合わせた結果は、出力を全画面にするなど画面の形が変わると合わなくなる。勝手に合わせ直しはせず、ずれていることだけを出し続ける
+  const goal = fitGoal();
+  $('fitNote').textContent = goal && Math.abs(goal.wanted - cfg.fh) >= 1
+    ? `いま${goal.onOutput ? '出力側' : 'プレビュー'}の字幕の領域に余白があります(窓の高さを ${Math.round(goal.wanted)}px にすると合う)。`
+    : '';
   $('note').textContent = !url ? '「ソース」に CoeFont の招待URLを貼って読み込む'
     : !slideStream ? 'スライド未選択(聴衆には黒い背景に字幕だけが見える)' : '';
 }
@@ -376,7 +390,7 @@ function render() {
     $(output).textContent = Math.round(cfg[key]) + 'px';
   }
   const split = isSplit();
-  $('bandLabel').textContent = SPLITS[cfg.layout]?.axis === 'x' ? '字幕の領域の幅' : '字幕の領域の高さ';
+  $('bandLabel').textContent = currentSplit()?.axis === 'x' ? '字幕の領域の幅' : '字幕の領域の高さ';
   $('layoutSel').value = cfg.layout;
   $('band').value = cfg.band * 100;
   $('oBand').textContent = Math.round(cfg.band * 100) + '%';
@@ -398,6 +412,14 @@ function render() {
   $('btnSlide').textContent = slideStream ? '変更' : '選択';
   $('stopSlide').disabled = !slideStream;
   layout();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, 300);
+}
+
+// ドラッグ中は pointermove のたびに render が走る。そのつど同期的に書き込むと操作が重くなるので、動きが止まってからまとめて保存する
+let saveTimer = 0;
+function save() {
+  clearTimeout(saveTimer);
   try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch {}
 }
 
@@ -528,24 +550,28 @@ function markAdjusting(holding) {
   if (!holding) adjustTimer = setTimeout(() => { adjusting = false; layout(); }, 1500);
 }
 
-// 窓の形を変えるのは利用者が押したときだけ。切り抜きには触らず、切り抜いた残りが領域と同じ縦横比になる高さへ窓を変える
-function fitWindow() {
-  // 聴衆が見るのは出力側なので、開いていればその画面の形に合わせる(手元のプレビューとは縦横比が違うことがある)
+// 切り抜いた残りが字幕の領域と同じ縦横比になる窓の高さ。並べる配置でなければ null。
+// 聴衆が見るのは出力側なので、開いていればその画面の形を基準にする(手元のプレビューとは縦横比が違うことがある)
+function fitGoal() {
   const onOutput = !!(out && out.scene.root.clientWidth && out.scene.root.clientHeight);
   const root = onOutput ? out.scene.root : stage;
   const r = regions(root.clientWidth, root.clientHeight);
-  if (!r) return;
-  const wanted = cfg.it + cfg.ib + (cfg.fw - cfg.il - cfg.ir) * r.sub.height / r.sub.width;
-  cfg.fh = wanted;
+  if (!r) return null;
+  return { onOutput, wanted: cfg.it + cfg.ib + (cfg.fw - cfg.il - cfg.ir) * r.sub.height / r.sub.width };
+}
+
+// 窓の形を変えるのは利用者が押したときだけ。切り抜きには触らない
+function fitWindow() {
+  const goal = fitGoal();
+  if (!goal) return;
+  cfg.fh = goal.wanted;
   markAdjusting(false);
   render();
   const size = `${Math.round(cfg.fw)}×${Math.round(cfg.fh)}px`;
-  if (Math.abs(cfg.fh - wanted) >= 0.5) {
-    setStatus(`窓の高さを ${Math.round(wanted)}px にすると合いますが、指定できる範囲(${WIN_H_RANGE[0]}〜${WIN_H_RANGE[1]}px)の外です。${size} で止めました。窓の幅か、字幕の領域の大きさを変えてからもう一度押してください。`, 'warn');
-  } else if (onOutput) {
-    setStatus(`CoeFont の窓を ${size} にして、出力側の今の画面の形に合わせました。出力を全画面にする前に押した場合は、全画面にしたあとでもう一度押すと正確に合います。`);
+  if (Math.abs(cfg.fh - goal.wanted) >= 0.5) {
+    setStatus(`窓の高さを ${Math.round(goal.wanted)}px にすると合いますが、指定できる範囲(${WIN_H_RANGE[0]}〜${WIN_H_RANGE[1]}px)の外です。${size} で止めました。窓の幅か、字幕の領域の大きさを変えてからもう一度押してください。`, 'warn');
   } else {
-    setStatus(`CoeFont の窓を ${size} にして、プレビューの形に合わせました。出力を開いたあとに押すと、出力側の画面の形に合わせます。`);
+    setStatus(`CoeFont の窓を ${size} にして、${goal.onOutput ? '出力側の今の画面' : 'プレビュー'}の形に合わせました。`);
   }
 }
 
@@ -557,6 +583,8 @@ function toggleFull() {
 // --- 字幕の枠を直接つかむ: 中=移動、角(赤)=拡大縮小、辺(青)=切り抜き ---
 let grab = null;
 gizmo.addEventListener('pointerdown', (e) => {
+  // 並べる配置で掴めるのは切り抜きの辺だけ。枠の中を押しても動かせないので、調整中の扱い(出力側の枠線)にもしない
+  if (isSplit() && !e.target.dataset.c) return;
   grab = {
     handle: e.target.dataset.h || '', edge: e.target.dataset.c || '', px: e.clientX, py: e.clientY,
     start: { ...cfg },
@@ -578,6 +606,8 @@ gizmo.addEventListener('pointermove', (e) => {
     // 掴んでいない辺の切り抜きには影響しない
     const cw = start.fw - start.il - start.ir, ch = start.fh - start.it - start.ib;
     const scale = w / cw;
+    // 重ねる配置では枠の幅に下限があり、それを割ると拡大率のほうが変わって掴んだ辺が付いてこなくなるので、その手前で止める
+    const minW = isSplit() ? MIN_PX : Math.max(MIN_PX, MIN_SUB_W * W / scale);
     let d;
     if (edge === 't') {
       d = clamp(dy / scale, -start.it, ch - MIN_PX);
@@ -586,10 +616,10 @@ gizmo.addEventListener('pointermove', (e) => {
       d = clamp(dy / scale, -(ch - MIN_PX), start.ib);
       cfg.ib = start.ib - d;
     } else if (edge === 'l') {
-      d = clamp(dx / scale, -start.il, cw - MIN_PX);
+      d = clamp(dx / scale, -start.il, cw - minW);
       cfg.il = start.il + d;
     } else {
-      d = clamp(dx / scale, -(cw - MIN_PX), start.ir);
+      d = clamp(dx / scale, -(cw - minW), start.ir);
       cfg.ir = start.ir - d;
     }
     // 重ねる配置は枠の位置と幅を設定として持っているので、中身と反対側の辺が動かないよう合わせて直す。
@@ -599,9 +629,6 @@ gizmo.addEventListener('pointermove', (e) => {
       else if (edge === 'l') { cfg.subX = start.subX + d * scale / W; cfg.subW = (cw - d) * scale / W; }
       else if (edge === 'r') cfg.subW = (cw + d) * scale / W;
     }
-  } else if (isSplit()) {
-    // 並べる配置では字幕は領域に収まるよう自動で置かれるので、移動も拡大縮小もない
-    return;
   } else if (!handle) {
     cfg.subX = (l + dx) / W;
     cfg.subY = (t + dy) / H;
@@ -616,6 +643,7 @@ gizmo.addEventListener('pointermove', (e) => {
   render();
 });
 for (const ev of ['pointerup', 'pointercancel']) gizmo.addEventListener(ev, () => {
+  if (!grab) return;
   grab = null;
   // 離したら、新しい切り抜きで領域に収め直す
   for (const sc of scenes()) sc.frozen = null;
@@ -634,7 +662,7 @@ divider.addEventListener('pointerdown', (e) => {
 });
 divider.addEventListener('pointermove', (e) => {
   if (!dividing) return;
-  const sp = SPLITS[cfg.layout];
+  const sp = currentSplit();
   if (!sp) return;
   const r = stage.getBoundingClientRect();
   const f = sp.axis === 'x' ? (e.clientX - r.left) / r.width : (e.clientY - r.top) / r.height;
@@ -648,6 +676,7 @@ const actions = {
   loadUrl, pickSlide, openOutput, toggleFull, fitWindow,
   stopSlide: () => { setSlide(null); setStatus('スライドの共有を停止しました。'); },
   resetCrop: () => { Object.assign(cfg, CROP_DEFAULTS); render(); },
+  resetWindow: () => { Object.assign(cfg, WINDOW_DEFAULTS); render(); },
   resetPos: () => { Object.assign(cfg, POS_DEFAULTS); render(); },
 };
 document.addEventListener('click', (e) => {
@@ -658,13 +687,24 @@ $('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadUrl(); 
 $('blend').addEventListener('change', (e) => { cfg.blend = e.target.value; render(); });
 $('layoutSel').addEventListener('change', (e) => { cfg.layout = e.target.value; markAdjusting(false); render(); });
 $('band').addEventListener('input', (e) => { markAdjusting(false); cfg.band = e.target.value / 100; render(); });
-for (const { input, key, range } of WINDOW_SLIDERS) {
+for (const { input, key, range, name } of WINDOW_SLIDERS) {
   [$(input).min, $(input).max] = range;
-  $(input).addEventListener('input', (e) => { markAdjusting(false); cfg[key] = +e.target.value; render(); });
+  $(input).addEventListener('input', (e) => {
+    const asked = +e.target.value;
+    markAdjusting(false);
+    cfg[key] = asked;
+    render();
+    // 切り抜きを守るために窓が縮まなかったとき、つまみが戻るだけだと故障に見えるので理由を出す
+    if (cfg[key] > asked) setStatus(`切り抜きで残している範囲が収まらなくなるため、窓の${name}は ${Math.round(cfg[key])}px より小さくできません。もっと小さくするには、先に切り抜きを減らしてください。`, 'warn');
+  });
 }
+$('layoutSel').append(new Option(OVERLAY_LABEL, 'overlay'), ...Object.entries(SPLITS).map(([value, { label }]) => new Option(label, value)));
 $('subOpacity').addEventListener('input', (e) => { cfg.subOpacity = e.target.value / 100; render(); });
 // このタブを閉じると出力ウィンドウを操作できなくなるので道連れにする
-window.addEventListener('pagehide', () => { if (out) out.win.close(); });
+window.addEventListener('pagehide', () => {
+  save();
+  if (out) out.win.close();
+});
 
 // --- 環境判定 ---
 if (!navigator.mediaDevices?.getDisplayMedia) {
